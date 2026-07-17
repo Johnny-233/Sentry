@@ -1,0 +1,29 @@
+# Build output
+build/
+debug/
+
+# Clangd cache
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# OS files
+Thumbs.db
+*.DS_Store
+
+# Compiled objects
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+
+# Precompiled headers
+*.gch
