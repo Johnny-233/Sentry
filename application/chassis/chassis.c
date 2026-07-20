@@ -143,13 +143,16 @@ static void OmniCalculate()
     cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
     sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
 
-    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta; 
-    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta; 
+    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
+    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
-    vt_lf = (chassis_vx - chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_cos_f32((3/4) * PI) + (chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_sin_f32((3/4) * PI);
-    vt_rf = (chassis_vx - chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_cos_f32((1/4) * PI) + (chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_sin_f32((1/4) * PI);
-    vt_lb = (chassis_vx - chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_cos_f32(-(3/4) * PI) + (chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_sin_f32(-(3/4) * PI);
-    vt_rb = (chassis_vx - chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_cos_f32(-(1/4) * PI) + (chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS) * arm_sin_f32(-(1/4) * PI);
+    // 全向轮 X 型布局逆运动学: v_i = vx*cos(α_i) + vy*sin(α_i) + R*ω
+    // 轮子角度: LF=45°, RF=135°, LB=225°, RB=315°
+    // 乘以 √2 使输出幅值与麦轮解算一致
+    vt_lf =  chassis_vx + chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
+    vt_rf = -chassis_vx + chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
+    vt_lb = -chassis_vx - chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
+    vt_rb =  chassis_vx - chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
 }
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值

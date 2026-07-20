@@ -11,6 +11,7 @@
 #include "buzzer.h"
 #include "referee_UI.h"
 #include "referee_task.h"
+#include "controller.h"
 
 // bsp
 #include "bsp_dwt.h"
@@ -45,6 +46,8 @@ static Robot_Status_e robot_state; // 机器人整体工作状态
 static  BuzzzerInstance *aim_success_buzzer;
 static DataLebel_t DataLebel;
 
+static PIDInstance chassis_follow_pid; // 底盘跟随模式PID
+
 static uint8_t gimbal_location_init=0;
 static uint8_t power_flag;
 
@@ -74,6 +77,18 @@ void RobotCMDInit()
         .octave=OCTAVE_2,
     };
     aim_success_buzzer= BuzzerRegister(&aim_success_buzzer_config);
+
+    // 底盘跟随模式PID初始化
+    PID_Init_Config_s chassis_follow_pid_config = {
+        .Kp = 50.0f,
+        .Ki = 0.0f,
+        .Kd = 3.0f,
+        .MaxOut = 4000.0f,
+        .DeadBand = 1.0f,
+        .Improve = PID_Derivative_On_Measurement,
+        .IntegralLimit = 0.0f,
+    };
+    PIDInit(&chassis_follow_pid, &chassis_follow_pid_config);
 
 
 
@@ -189,8 +204,8 @@ static void BasicSet()
 
 static void GimbalRC()
 {
-    gimbal_cmd_send.yaw -= 0.0045f * (float)rc_data[TEMP].rc.rocker_right_x;//0.0005f * (float)rc_data[TEMP].rc.rocker_right_x
-    gimbal_cmd_send.pitch -= 0.00005f * (float)rc_data[TEMP].rc.rocker_right_y;
+    gimbal_cmd_send.yaw -= 0.003f * (float)rc_data[TEMP].rc.rocker_right_x;
+    gimbal_cmd_send.pitch -= 0.00003f * (float)rc_data[TEMP].rc.rocker_right_y;
     gimbal_cmd_send.real_pitch= ((gimbal_fetch_data.gimbal_imu_data.Pitch)-gimbal_fetch_data.init_location)/57.39;
 }
 
@@ -206,9 +221,9 @@ static void ChassisRotateSet()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_send.chassis_mode)
     {
-        //底盘跟随就不调了，懒
-        case CHASSIS_FOLLOW_GIMBAL_YAW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-            chassis_cmd_send.wz =-2.0*abs(chassis_cmd_send.offset_angle)*chassis_cmd_send.offset_angle;
+        //底盘跟随模式,使用PID控制器
+        case CHASSIS_FOLLOW_GIMBAL_YAW:
+            chassis_cmd_send.wz = PIDCalculate(&chassis_follow_pid, chassis_cmd_send.offset_angle, 0.0f);
         break;
         case CHASSIS_ROTATE: // 变速小陀螺
             chassis_cmd_send.wz = 4000*chassis_cmd_send.chassis_rotate_buff;
@@ -229,6 +244,7 @@ static void ChassisRC()
     else if(switch_is_mid(rc_data[TEMP].rc.switch_left))
     {
         chassis_cmd_send.chassis_mode=CHASSIS_ROTATE;
+        chassis_cmd_send.chassis_rotate_buff = 1.0f;
     }
     ChassisRotateSet();
 }
