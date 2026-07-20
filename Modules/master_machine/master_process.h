@@ -5,7 +5,7 @@
 #include "seasky_protocol.h"
 
 #define Minipc_Recv_sIZE 36u // 新协议27字节,留余量
-#define Minipc_Send_sIZE 36u
+#define Minipc_Send_sIZE 50u // 1(header) + 38(struct) + 余量
 
 #pragma pack(1)
 typedef enum
@@ -70,12 +70,22 @@ typedef struct
 {
 	struct
 	{
-		uint8_t header;  // 帧头，固定为0x5A
-		uint8_t detect_color;
-		float roll;
-		float pitch;
-		float yaw;
-		uint16_t checksum; // 校验和
+		uint8_t header;             // 帧头，固定为0xA5 (由send函数写入tx_buf[0])
+		uint8_t detect_color;       // B: 敌方颜色
+		uint8_t reserved;           // B: 保留字节, 置0
+		float roll;                 // f: roll角
+		float pitch;                // f: pitch角
+		float yaw;                  // f: yaw角
+		float vx;                   // f: x轴线速度 (未得到置0)
+		float vy;                   // f: y轴线速度 (未得到置0)
+		uint16_t self_sentry_hp;    // H: 己方哨兵血量
+		uint16_t self_hero_hp;      // H: 己方英雄血量
+		uint16_t self_infantry_hp;  // H: 己方步兵血量
+		uint16_t remain_time;       // H: 剩余时间
+		uint16_t remain_bullet;     // H: 剩余子弹数
+		uint8_t match_progress;     // B: 比赛进度
+		uint8_t occupation;         // B: 占领状态
+		float bullet_speed;         // f: 子弹速度
 	}Vision;
 
 } __attribute__((packed)) Minipc_Send_s;
@@ -99,7 +109,7 @@ Minipc_Recv_s *minipcInit(UART_HandleTypeDef *_handle);
  * @brief 发送视觉数据
  *
  */
-void SendMinipcData();
+void SendMinipcData(Minipc_Send_s *send_data);
 
 
 

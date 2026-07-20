@@ -211,8 +211,8 @@ static void GimbalRC()
 
 static void GimbalAC()
 {
-    gimbal_cmd_send.yaw-=0.007f*minipc_recv_data->Vision.yaw;   //往右获得的yaw是减
-    gimbal_cmd_send.pitch -= 0.009f*minipc_recv_data->Vision.pitch;
+    gimbal_cmd_send.yaw-=0.0007f*minipc_recv_data->Vision.yaw;   //往右获得的yaw是减
+    gimbal_cmd_send.pitch -= 0.0009f*minipc_recv_data->Vision.pitch;
 }
 
 
@@ -342,7 +342,10 @@ static void SentryScan()
     }
 }
 static void SentryMode()
-{ 
+{
+    static float no_target_start_time = 0.0f;
+    static uint8_t no_target_timer_running = 0;
+
     if (DataLebel.cmd_error_flag == 1 ||
             minipc_recv_data->Vision.header != PROTOCOL_CMD_ID)
         {
@@ -352,24 +355,55 @@ static void SentryMode()
             chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
             ChassisRotateSet();
             ShootRC();
+            no_target_timer_running = 0;
+            return;
         }
-    else if (minipc_recv_data->Vision.yaw == 0.0f &&
-                 minipc_recv_data->Vision.pitch == 0.0f)
+
+    /* 在线: 根据小电脑 gimbal_mode 决定底盘模式 */
+    if (minipc_recv_data->Vision.gimbal_mode != 0)
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        chassis_cmd_send.chassis_rotate_buff = 1.0f;
+        ChassisRotateSet();
+    }
+    else
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+    }
+
+    if (minipc_recv_data->Vision.yaw == 0.0f &&
+             minipc_recv_data->Vision.pitch == 0.0f)
         {
-            /* ② 小电脑在线但无目标 → 云台扫描 + 底盘仍由小电脑控制 */
-            SentryScan();
-            gimbal_cmd_send.autoaim_mode = AUTO_OFF;
+            /* ② 小电脑在线但无目标 → 连续5秒无目标后才进入扫描模式 */
+            if (!no_target_timer_running)
+            {
+                no_target_start_time = DWT_GetTimeline_s();
+                no_target_timer_running = 1;
+            }
+
+            if (DWT_GetTimeline_s() - no_target_start_time >= 5.0f)
+            {
+                /* 连续5秒无目标，进入扫描模式 */
+                SentryScan();
+                gimbal_cmd_send.autoaim_mode = AUTO_OFF;
+            }
+            else
+            {
+                /* 5秒内暂保持自动瞄准模式，等待目标重新出现 */
+                gimbal_cmd_send.autoaim_mode = AUTO_ON;
+            }
+
             chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x * 10000;
             chassis_cmd_send.vy = minipc_recv_data->Vision.linear_velocity_y * 10000;
-            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
             ShootRC();
         }
     else
         {
-            /* ③ 小电脑在线且有目标 → 小电脑完全接管 */
+            /* ③ 小电脑在线且有目标 → 小电脑完全接管，重置无目标计时器 */
+            no_target_timer_running = 0;
+
             chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x;
             chassis_cmd_send.vy = minipc_recv_data->Vision.linear_velocity_y;
-            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
 
             if (DataLebel.aim_flag == 1)
             {
@@ -381,6 +415,7 @@ static void SentryMode()
             else
             {
                 gimbal_cmd_send.autoaim_mode = AUTO_ON;
+                GimbalAC();
                 ShootRC();
             }
         }
@@ -624,7 +659,7 @@ void RobotCMDTask()
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
-    VisionSetAltitude();
+    EnemyJudge();
     SendMinipcData(&minipc_send_data);
     SendToUIData();
 

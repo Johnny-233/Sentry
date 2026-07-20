@@ -5,7 +5,6 @@
 #include "memory.h"
 
 static Minipc_Recv_s minipc_recv_data;
-static Minipc_Send_s minipc_send_data;
 /*获取CRC8校验码*/
 uint8_t Get_CRC8_Check(uint8_t *pchMessage,uint16_t dwLength)
 {
@@ -67,35 +66,21 @@ void get_protocol_send_Vision_data(uint16_t send_id,        // 信号id
     static uint16_t crc16;
     static uint16_t data_len;
 
-    data_len =  2;
+    // 有效载荷长度: 1(header) + 38(payload) = 39字节
+    data_len = 1 + sizeof(tx_data->Vision) - 1;
+
     /*帧头部分*/
     tx_buf[0] = SEND_VISION_ID;
-    /*数据段*/
-    tx_buf[1] =tx_data->Vision.detect_color;
-    *tx_buf_len = data_len ;
-    //tx_buf[1] = data_len & 0xff;        // 低位在前
-    //tx_buf[2] = (data_len >> 8) & 0xff; // 低位在前
-    //tx_buf[3] = crc_8(&tx_buf[0], 3);   // 获取CRC8校验位
+    /*数据段: 跳过结构体中的header字段, 从detect_color开始复制 */
+    /*对应Python格式: <BBfffffHHHHHBBf (38字节) */
+    memcpy(&tx_buf[1], &tx_data->Vision.detect_color, sizeof(tx_data->Vision) - 1);
 
-    /*数据的信号id*/
-    //tx_buf[4] = send_id & 0xff;
-    //tx_buf[5] = (send_id >> 8) & 0xff;
+    /*整包校验: CRC16覆盖 header + payload */
+    crc16 = crc_16(&tx_buf[0], data_len);
+    tx_buf[data_len] = crc16 & 0xff;
+    tx_buf[data_len + 1] = (crc16 >> 8) & 0xff;
 
-    /*建立16位寄存器*/
-    //tx_buf[6] = flags_register & 0xff;
-    //tx_buf[7] = (flags_register >> 8) & 0xff;
-
-    /*float数据段*/
-    //for (int i = 0; i < 4 * float_length; i++)
-    //{
-    //    tx_buf[i + 8] = ((uint8_t *)(&tx_data[i / 4]))[i % 4];
-    //}
-
-    /*整包校验*/
-    //crc16 = crc_16(&tx_buf[0], data_len + 6);
-    //tx_buf[data_len + 6] = crc16 & 0xff;
-    //tx_buf[data_len + 7] = (crc16 >> 8) & 0xff;
-
+    *tx_buf_len = data_len + 2; // header + payload + CRC16
 }
 
 /*

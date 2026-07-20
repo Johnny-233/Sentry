@@ -33,6 +33,7 @@
 /* Private variables ---------------------------------------------------------*/
 static USBCallback tx_cbk = NULL;
 static USBCallback rx_cbk = NULL;
+static uint8_t cdc_connected = 0; // 主机是否已打开串口 (DTR置位)
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -229,7 +230,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
     break;
 
     case CDC_SET_CONTROL_LINE_STATE:
-
+        cdc_connected = (pbuf[0] & 0x01); // DTR bit 指示主机是否打开串口
     break;
 
     case CDC_SEND_BREAK:
@@ -291,6 +292,9 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }
+  if (!cdc_connected) {
+    return USBD_FAIL;
+  }
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
   /* USER CODE END 7 */
@@ -316,6 +320,11 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
   UNUSED(Buf);
   UNUSED(Len);
   UNUSED(epnum);
+  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+  if (hcdc->TxState != 0) {
+    hcdc->TxState = 0; // 强制清除状态，防止卡死
+    return result;
+  }
   if(tx_cbk)
     tx_cbk(*Len);
   /* USER CODE END 13 */
