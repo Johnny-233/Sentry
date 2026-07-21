@@ -96,6 +96,7 @@ USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application)
 USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application/chassis)
 USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application/cmd)
 USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application/gimbal)
+USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application/gimbal_algorithm)
 USER_ADD_DIR(${CMAKE_SOURCE_DIR}/application/shoot)
 
 add_custom_command(

@@ -8,14 +8,18 @@
 #include "message_center.h"
 #include "general_def.h"
 #include "dji_motor.h"
-#include "buzzer.h"
+#include "controller.h"
+#include "mi_motor.h"
+#include "gimbal.h"
+#include "gimbal_algorithm.h"
 #include "referee_UI.h"
 #include "referee_task.h"
-#include "controller.h"
 
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+
+#include <math.h>
 
 // 私有宏,自动将编码器转换成角度值
 #define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI) // 对齐时的角度,0-360
@@ -43,19 +47,20 @@ static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
 static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
-static  BuzzzerInstance *aim_success_buzzer;
 static DataLebel_t DataLebel;
-
-static PIDInstance chassis_follow_pid; // 底盘跟随模式PID
 
 static uint8_t gimbal_location_init=0;
 static uint8_t power_flag;
 
 static referee_info_t* referee_data; // 用于获取裁判系统的数据
 static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
-static float cnt1,cnt2; 
 static float chassis_rotate_buff;
 static float chassis_speed_buff;
+
+static PIDInstance chassis_follow_pid; // 底盘跟随模式PID
+
+static cal_round_patrol_t round_patrol;
+static cal_mid_round_patrol_t mid_round_patrol;
 
 void RobotCMDInit()
 {
@@ -72,12 +77,6 @@ void RobotCMDInit()
     chassis_feed_sub = SubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
     gimbal_cmd_send.pitch = 0;
 
-    Buzzer_config_s aim_success_buzzer_config= {
-        .alarm_level=ALARM_LEVEL_ABOVE_MEDIUM,
-        .octave=OCTAVE_2,
-    };
-    aim_success_buzzer= BuzzerRegister(&aim_success_buzzer_config);
-
     // 底盘跟随模式PID初始化
     PID_Init_Config_s chassis_follow_pid_config = {
         .Kp = 50.0f,
@@ -90,8 +89,6 @@ void RobotCMDInit()
     };
     PIDInit(&chassis_follow_pid, &chassis_follow_pid_config);
 
-
-
 }
 
 
@@ -102,6 +99,7 @@ void RobotCMDInit()
  */
 static void CalcOffsetAngle()
 {
+    gimbal_fetch_data.offset_diff = gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
     // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
     static float angle;
     angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
@@ -140,52 +138,40 @@ static void GimbalPitchLimit()
  */
 static void VisionJudge()
 {
-    //cnt1用于检测小电脑的离线，取值为[-1,1]
-    //在-0.1到1且小电脑未离线时，读取深度
-    cnt1=sin(DWT_GetTimeline_s());
-    if(cnt1>-0.1&&cnt1<1&&DataLebel.cmd_error_flag==0)
+    static float target_lost_time = 0.0f;
+    static uint8_t target_timer_running = 0;
+
+    /* 小电脑识别到目标时yaw/pitch会有非零数据 */
+    if (minipc_recv_data->Vision.yaw != 0.0f || minipc_recv_data->Vision.pitch != 0.0f)
     {
-        gimbal_cmd_send.last_deep= minipc_recv_data->Vision.can_fire;
+        DataLebel.vision_flag = 1;
+        target_timer_running = 0;
     }
-    //有深度代表有视觉信息
-    if(minipc_recv_data->Vision.can_fire!=0&&DataLebel.cmd_error_flag==0)//代表收到信息
+    else if (DataLebel.vision_flag == 1)
     {
-        DataLebel.aim_flag=1;
-        //检测到装甲板，开启蜂鸣器
-        AlarmSetStatus(aim_success_buzzer, ALARM_ON);
-        //与装甲板中心的距离越近，蜂鸣器越响
-        if(abs(minipc_recv_data->Vision.yaw)>1&&aim_success_buzzer->loudness<0.5)
+        /* yaw和pitch同时为0：可能是无目标，也可能是恰好瞄准在目标中心 */
+        if (!target_timer_running)
         {
-            aim_success_buzzer->loudness=0.5*(1/abs(minipc_recv_data->Vision.yaw));
+            target_lost_time = DWT_GetTimeline_s();
+            target_timer_running = 1;
         }
-        else if(abs(minipc_recv_data->Vision.yaw)<1 && abs(minipc_recv_data->Vision.pitch)<1)
+
+        if (DWT_GetTimeline_s() - target_lost_time >= 1.0f)
         {
-            //离装甲板距离较近时，开火
-            aim_success_buzzer->loudness=0.5;
-            if(DataLebel.reverse_flag==1)
-            {
-                DataLebel.fire_flag=0;
-            }
-            else
-            {
-                DataLebel.fire_flag=1;
-            }
-        }
-        //在cnt1<-0.2时，此时不读取深度，但如果之前读取到的深度与实际深度一致，证明小电脑离线，停止自瞄
-        if(minipc_recv_data->Vision.can_fire-gimbal_cmd_send.last_deep==0&&cnt1<-0.2)
-        {
-            DataLebel.cmd_error_flag=1;
-            DataLebel.fire_flag=0;
-            DataLebel.aim_flag=0;
-            AlarmSetStatus(aim_success_buzzer, ALARM_OFF);
+            /* 连续1秒yaw/pitch都为0，确认丢失目标 */
+            DataLebel.vision_flag = 0;
+            target_timer_running = 0;
         }
     }
-     //检测不到装甲板，关蜂鸣器，关火
-    else if(minipc_recv_data->Vision.can_fire==0 && DataLebel.aim_flag==1)       
+
+    /* 仅当小电脑瞄准锁定目标时才允许开火 */
+    if (minipc_recv_data->Vision.can_fire != 0)
     {
-        DataLebel.fire_flag=0;
-        DataLebel.aim_flag=0;
-        AlarmSetStatus(aim_success_buzzer, ALARM_OFF);    
+        DataLebel.fire_flag = 1;
+    }
+    else
+    {
+        DataLebel.fire_flag = 0;
     }
 }
 
@@ -209,10 +195,24 @@ static void GimbalRC()
     gimbal_cmd_send.real_pitch= ((gimbal_fetch_data.gimbal_imu_data.Pitch)-gimbal_fetch_data.init_location)/57.39;
 }
 
-static void GimbalAC()
+void FoundEnermy()
 {
-    gimbal_cmd_send.yaw-=0.0007f*minipc_recv_data->Vision.yaw;   //往右获得的yaw是减
-    gimbal_cmd_send.pitch -= 0.0009f*minipc_recv_data->Vision.pitch;
+    gimbal_cmd_send.autoaim_mode = AUTO_ON;
+
+    /* yaw: 自适应滤波 + 速率限幅 */
+    float yaw_err = minipc_recv_data->Vision.yaw;
+    float abs_err = fabsf(yaw_err);
+
+    if (abs_err > 0.3f)
+    {
+        float target_yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle - yaw_err;
+        gimbal_cmd_send.yaw = target_yaw;
+        gimbal_cmd_send.yaw = Cal_FollowControl_Set(gimbal_fetch_data.gimbal_imu_data, gimbal_cmd_send);
+    }
+    /* |误差| ≤ 0.3°: 死区锁死 */
+
+    /* pitch跟踪 */
+    gimbal_cmd_send.pitch += 0.0008f * minipc_recv_data->Vision.pitch;  // 0.0011->0.0005 减缓噪声累积
 }
 
 
@@ -221,14 +221,24 @@ static void ChassisRotateSet()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_send.chassis_mode)
     {
-        //底盘跟随模式,使用PID控制器
+        //底盘跟随模式,将offset_angle量化到最近的90°作为目标(4个正方向)
         case CHASSIS_FOLLOW_GIMBAL_YAW:
-            chassis_cmd_send.wz = PIDCalculate(&chassis_follow_pid, chassis_cmd_send.offset_angle, 0.0f);
+        {
+            float raw = chassis_cmd_send.offset_angle;
+            float snapped;
+            // 就近量化到90°的倍数 —— 4个固定正方向: 0°, ±90°, 180°/-180°
+            if (raw >= 0.0f)
+                snapped = (float)((int)(raw / 90.0f + 0.5f)) * 90.0f;
+            else
+                snapped = (float)((int)(raw / 90.0f - 0.5f)) * 90.0f;
+            chassis_cmd_send.wz = PIDCalculate(&chassis_follow_pid, raw, snapped);
+        }
         break;
         case CHASSIS_ROTATE: // 变速小陀螺
-            chassis_cmd_send.wz = 4000*chassis_cmd_send.chassis_rotate_buff;
+            chassis_cmd_send.wz = 4000 * chassis_cmd_send.chassis_rotate_buff;
         break;
         default:
+            chassis_cmd_send.wz = 0.0;
         break;
     }
 }
@@ -246,6 +256,11 @@ static void ChassisRC()
         chassis_cmd_send.chassis_mode=CHASSIS_ROTATE;
         chassis_cmd_send.chassis_rotate_buff = 1.0f;
     }
+    else if (switch_is_up(rc_data[TEMP].rc.switch_left))
+    {
+        chassis_cmd_send.chassis_mode=CHASSIS_ROTATE;
+        chassis_cmd_send.chassis_rotate_buff = -1.0f;
+    }
     ChassisRotateSet();
 }
 
@@ -257,7 +272,7 @@ static void AutoAimSet()
 {
     if(DataLebel.aim_flag==1)
     {
-        GimbalAC();
+        FoundEnermy();
         if(DataLebel.fire_flag==1)
         {
             shoot_cmd_send.loader_mode = LOAD_BURSTFIRE;
@@ -290,135 +305,150 @@ static void ShootRC()
 static void RemoteControlSet()
 {
     ChassisRC();
-    if(switch_is_up(rc_data[TEMP].rc.switch_left)) 
+    gimbal_cmd_send.autoaim_mode=AUTO_OFF;
+    GimbalRC();
+    ShootRC();
+}
+static void GetGimbalInitImu()
+{
+    if (mid_round_patrol.flag == 0)
     {
-        AutoAimSet();
-        if(DataLebel.aim_flag!=1)
-        {
-            gimbal_cmd_send.autoaim_mode=AUTO_ON;
-            ShootRC();
-            GimbalRC();
-        }
-        else
-        {
-            gimbal_cmd_send.autoaim_mode=FIND_Enermy;
-        }
-    }
-    else
-    {
-        gimbal_cmd_send.autoaim_mode=AUTO_OFF;
-        GimbalRC();
-        ShootRC();
+        mid_round_patrol.yaw_init = gimbal_fetch_data.gimbal_imu_data.Yaw;
+        mid_round_patrol.yaw = mid_round_patrol.yaw_init;
+        mid_round_patrol.flag = 1;
     }
 }
-static void SentryScan()
+
+static void RoundPatrol()
 {
-    static int8_t pitch_dir = 1;
-
-    const float yaw_speed = 0.9f;    // yaw 慢速顺时针旋转
-    const float pitch_speed = 0.02f;  // pitch 摆动步进
-
-    // Yaw: 持续缓慢顺时针旋转
-    gimbal_cmd_send.yaw += yaw_speed;
-
-    // Pitch: 上下摆动,带限位保护
-    if (pitch_dir == 1)
+    if (round_patrol.flag == 0)
     {
-        gimbal_cmd_send.pitch += pitch_speed;
-        if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE - pitch_speed * 0.5f)
-        {
-            gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-            pitch_dir = -1;
-        }
+        round_patrol.init_totol_round = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle / 360.0f;
+        round_patrol.flag = 1;
     }
-    else
-    {
-        gimbal_cmd_send.pitch -= pitch_speed;
-        if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE + pitch_speed * 0.5f)
-        {
-            gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-            pitch_dir = 1;
-        }
-    }
+    round_patrol.total_round = (gimbal_fetch_data.gimbal_imu_data.YawTotalAngle / 360.0f) - round_patrol.init_totol_round;
+    gimbal_cmd_send.yaw += 0.5f;
 }
-static void SentryMode()
+
+static void MidRoundPatrol()
 {
-    static float no_target_start_time = 0.0f;
-    static uint8_t no_target_timer_running = 0;
+    if (mid_round_patrol.flag == 0)
+    {
+        mid_round_patrol.yaw_init = gimbal_fetch_data.gimbal_imu_data.Yaw;
+        mid_round_patrol.yaw = mid_round_patrol.yaw_init;
+        mid_round_patrol.flag = 1;
+    }
 
-    if (DataLebel.cmd_error_flag == 1 ||
-            minipc_recv_data->Vision.header != PROTOCOL_CMD_ID)
-        {
-            /* ① 小电脑离线 → 全自主扫描 */
-            SentryScan();
-            gimbal_cmd_send.autoaim_mode = AUTO_OFF;
-            chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
-            ChassisRotateSet();
-            ShootRC();
-            no_target_timer_running = 0;
-            return;
-        }
+    float current_relative_angle = gimbal_fetch_data.gimbal_imu_data.Yaw - mid_round_patrol.yaw_init;
+    current_relative_angle += 0.15f * mid_round_patrol.direction;
 
-    /* 在线: 根据小电脑 gimbal_mode 决定底盘模式 */
+    if (current_relative_angle > 70.0f)
+    {
+        current_relative_angle = 70.0f;
+        mid_round_patrol.direction = -1;
+    }
+    else if (current_relative_angle < -70.0f)
+    {
+        current_relative_angle = -70.0f;
+        mid_round_patrol.direction = 1;
+    }
+
+    gimbal_cmd_send.yaw = current_relative_angle + round_patrol.total_round * 360.0f;
+    mid_round_patrol.yaw_total_angle = current_relative_angle;
+}
+
+static void Sentry_ChassisAC()
+{
+    chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x * 4.0f * REDUCTION_RATIO_WHEEL * 360.0f / PERIMETER_WHEEL * 1000.0f;
+    chassis_cmd_send.vy = -minipc_recv_data->Vision.linear_velocity_y * 4.0f * REDUCTION_RATIO_WHEEL * 360.0f / PERIMETER_WHEEL * 1000.0f;
+
     if (minipc_recv_data->Vision.gimbal_mode != 0)
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
-        chassis_cmd_send.chassis_rotate_buff = 1.0f;
-        ChassisRotateSet();
+        if (chassis_fetch_data.power_flag == 1)
+        {
+            chassis_cmd_send.chassis_rotate_buff = 2;
+        }
+        else
+        {
+            chassis_cmd_send.chassis_rotate_buff = 1.0;
+        }
     }
     else
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
     }
+}
 
-    if (minipc_recv_data->Vision.yaw == 0.0f &&
-             minipc_recv_data->Vision.pitch == 0.0f)
-        {
-            /* ② 小电脑在线但无目标 → 连续5秒无目标后才进入扫描模式 */
-            if (!no_target_timer_running)
-            {
-                no_target_start_time = DWT_GetTimeline_s();
-                no_target_timer_running = 1;
-            }
-
-            if (DWT_GetTimeline_s() - no_target_start_time >= 5.0f)
-            {
-                /* 连续5秒无目标，进入扫描模式 */
-                SentryScan();
-                gimbal_cmd_send.autoaim_mode = AUTO_OFF;
-            }
-            else
-            {
-                /* 5秒内暂保持自动瞄准模式，等待目标重新出现 */
-                gimbal_cmd_send.autoaim_mode = AUTO_ON;
-            }
-
-            chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x * 10000;
-            chassis_cmd_send.vy = minipc_recv_data->Vision.linear_velocity_y * 10000;
-            ShootRC();
-        }
+static void ShootAC()
+{
+    if (DataLebel.fire_flag == 1)
+    {
+        shoot_cmd_send.loader_mode = LOAD_BURSTFIRE;
+    }
     else
+    {
+        shoot_cmd_send.loader_mode = LOAD_STOP;
+        DataLebel.reverse_flag = 0;
+    }
+}
+
+static void Sentry_GimbalAC()
+{
+    static MIMotorInstance *PP_Motor;
+    PP_Motor = GetPitchMotor();
+    static float PIT;
+    GetGimbalInitImu();
+
+    /* 小电脑无目标 → 自主巡逻 */
+    if (DataLebel.vision_flag == 0)
+    {
+        DataLebel.t_pitch = (float)DWT_GetTimeline_s();
+        PIT = 0.2f * sinf(10.0f * DataLebel.t_pitch) - 0.35;
+        GimbalPitchLimit();
+
+        if (fabs(PP_Motor->measure.angle - PIT) >= 0.1 && DataLebel.ACEntryPoint)
         {
-            /* ③ 小电脑在线且有目标 → 小电脑完全接管，重置无目标计时器 */
-            no_target_timer_running = 0;
-
-            chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x;
-            chassis_cmd_send.vy = minipc_recv_data->Vision.linear_velocity_y;
-
-            if (DataLebel.aim_flag == 1)
+            gimbal_cmd_send.pitch = 0.5f * PIT;
+            if (fabs(PP_Motor->measure.angle - PIT) <= 0.01)
             {
-                gimbal_cmd_send.autoaim_mode = FIND_Enermy;
-                GimbalAC();
-                if (DataLebel.fire_flag == 1)
-                    shoot_cmd_send.loader_mode = LOAD_BURSTFIRE;
+                DataLebel.ACEntryPoint = 0;
             }
-            else
-            {
-                gimbal_cmd_send.autoaim_mode = AUTO_ON;
-                GimbalAC();
-                ShootRC();
-            }
+            RoundPatrol();
         }
+        else
+        {
+            gimbal_cmd_send.pitch = PIT;
+            DataLebel.ACEntryPoint = 0;
+            RoundPatrol();
+        }
+        gimbal_cmd_send.autoaim_mode = AUTO_OFF;
+    }
+    else
+    {
+        /* 小电脑有目标 → 视觉跟踪 */
+        FoundEnermy();
+    }
+}
+
+static void SentrySet()
+{
+    Sentry_ChassisAC();
+    ChassisRotateSet();
+    ShootAC();
+    Sentry_GimbalAC();
+}
+
+void Deathcheck()
+{
+    if (referee_data->GameRobotState.current_HP == 0)
+    {
+        gimbal_cmd_send.Death_reInit = 1;
+    }
+    else
+    {
+        gimbal_cmd_send.Death_reInit = 0;
+    }
 }
 
 static void NoneAutoMouseControl()
@@ -444,42 +474,27 @@ static void NoneAutoMouseControl()
 }
 static void MouseControl()
 {
-    DataLebel.aim_flag=0;
-    if(rc_data[TEMP].mouse.press_r==1)
+    if (rc_data[TEMP].mouse.press_r == 1)
     {
-        if(DataLebel.aim_flag!=1)
-        {
-            gimbal_cmd_send.autoaim_mode=AUTO_ON;
-        }
-        else 
-        {
-            gimbal_cmd_send.autoaim_mode=FIND_Enermy; 
-        }  
-    } 
+        /* 右键按下 → 小电脑接管云台控制 + can_fire自动开火 */
+        gimbal_cmd_send.autoaim_mode = FIND_Enermy;
+        FoundEnermy();
+        if (minipc_recv_data->Vision.can_fire == 1)
+            shoot_cmd_send.loader_mode = LOAD_BURSTFIRE;
+        else
+            shoot_cmd_send.loader_mode = LOAD_STOP;
+    }
     else
     {
+        /* 右键未按下 → 手动鼠标控制 */
         gimbal_cmd_send.autoaim_mode = AUTO_OFF;
-    }
-    
-    if(gimbal_cmd_send.autoaim_mode==AUTO_ON||gimbal_cmd_send.autoaim_mode==FIND_Enermy)
-    {
-        AutoAimSet();
-        if(DataLebel.aim_flag!=1)
-        {
-            NoneAutoMouseControl();
-        }
-    }
-    else
-    {
         NoneAutoMouseControl();
     }
-
-   
 }
 
 static void KeyControl()
 {
-    chassis_cmd_send.vx = (rc_data[TEMP].key[KEY_PRESS].w * 20000 - rc_data[TEMP].key[KEY_PRESS].s * 20000)*chassis_speed_buff; 
+    chassis_cmd_send.vx = (rc_data[TEMP].key[KEY_PRESS].w * 20000 - rc_data[TEMP].key[KEY_PRESS].s * 20000)*chassis_speed_buff;
     chassis_cmd_send.vy = (rc_data[TEMP].key[KEY_PRESS].d * 20000 - rc_data[TEMP].key[KEY_PRESS].a * 20000)*chassis_speed_buff;
 
     ChassisRotateSet();
@@ -596,6 +611,8 @@ static void AnythingStop()
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.loader_mode = LOAD_STOP;
+    gimbal_cmd_send.pitch = 0.0;
+    DataLebel.ACEntryPoint = 1;
     //重置与小电脑通信失败的标志位
     DataLebel.cmd_error_flag=0;
 }
@@ -613,8 +630,8 @@ static void ControlDataDeal()
     }
     else if (switch_is_up(rc_data[TEMP].rc.switch_right))
     {
-        BasicSet(); // VisionJudge 更新 cmd_error_flag / aim_flag / fire_flag
-        SentryMode();
+        BasicSet();
+        SentrySet(); // 哨兵自动模式
     }
     else if (switch_is_down(rc_data[TEMP].rc.switch_right)) 
     {
@@ -649,6 +666,8 @@ void RobotCMDTask()
     SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
+
+    Deathcheck();
 
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();

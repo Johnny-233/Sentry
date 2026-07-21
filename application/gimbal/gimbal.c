@@ -27,20 +27,20 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 30, // 8
+                .Kp = 40, // 30->40 增强跟踪响应
                 .Ki = 20,
-                .Kd = 3,//1.2
+                .Kd = 6,// 3->6 增加阻尼抑制震荡
                 .DeadBand = 0.1,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
                 .CoefA = 7,
                 .CoefB = 7,
                 .MaxOut = 330,
-                .FF_Gain = 350.0,
+                .FF_Gain = 350.0,  
             },
             .speed_PID = {
-                .Kp = 45,  // 50
-                .Ki = 150, // 200
+                .Kp = 50,  // 50
+                .Ki = 60,  // 150 -> 60, 抑制锁定微振
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3000,
@@ -67,8 +67,8 @@ void GimbalInit()
         },
         .controller_param_init_config={
             .angle_PID={
-                .Kp=10,
-                .Kd=0.35,
+                .Kp=15,  // 10->15 补偿积分增益降低
+                .Kd=1.0,  // 0.35->1.0 增加阻尼抑制微振
                 .FF_Gain = 0.0,
             },
             .speed_PID={
@@ -142,4 +142,14 @@ void GimbalTask()
     SendGimbalData();
     // 推送消息
     PubPushMessage(gimbal_pub, (void *)&gimbal_feedback_data);
+}
+
+DJIMotorInstance* GetYawMotor(void)
+{
+    return yaw_motor;
+}
+
+MIMotorInstance* GetPitchMotor(void)
+{
+    return pitch_motor;
 }

@@ -28,8 +28,9 @@
 #define OMNI_WHEEL_CHASSIC_RADIUS 230 //全向轮底盘半径
 #define CENTER_GIMBAL_OFFSET_X 0    // 云台旋转中心距底盘几何中心的距离,前后方向,云台位于正中心时默认设为0
 #define CENTER_GIMBAL_OFFSET_Y 0    // 云台旋转中心距底盘几何中心的距离,左右方向,云台位于正中心时默认设为0
-#define RADIUS_WHEEL 60             // 轮子半径
+#define RADIUS_WHEEL 60.0f          // 轮子半径
 #define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
+#define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮周长(速度计算用)
 
 #pragma pack(1) // 压缩结构体,取消字节对齐,下面的数据都可能被传输
 /* -------------------------基本控制模式和数据类型定义-------------------------*/
@@ -106,17 +107,41 @@ typedef struct
     float chassis_power_mx;
 } Chassis_Power_Data_s;
 
+/**
+ * @brief 中场巡航控制参数
+ */
+typedef struct {
+    uint8_t flag;               // 巡航启用标志
+    float yaw_init;             // 巡航起始角度
+    float yaw_total_angle;     // 云台累计转角
+    float yaw;                  // 当前目标偏航角
+    int direction;              // 扫描方向(1:顺时针 -1:逆时针)
+    uint8_t Power_Out;         // 掉线保护标志
+} cal_mid_round_patrol_t;
+
+/**
+ * @brief 全场巡航控制参数
+ */
+typedef struct {
+    int32_t init_totol_round;   // 初始全场圈数
+    int32_t total_round;        // 当前总巡航圈数
+    uint8_t flag;               // 巡航状态标志
+    float yaw_init;             // 起始基准角度
+} cal_round_patrol_t;
+
 /* ----------------用于记录时间或标志位的结构体---------------- */
 typedef struct
 {
     float t_shoot;
     float t_pitch;
     float t_cmd_error;
+    uint8_t vision_flag;  // 视觉系统工作标志
     uint8_t aim_flag;
     uint8_t shoot_flag;
     uint8_t cmd_error_flag;
     uint8_t fire_flag;
     uint8_t reverse_flag;
+    uint8_t ACEntryPoint; // 自动控制入口点
 }DataLebel_t;
 
 /* ----------------CMD应用发布的控制数据,应当由gimbal/chassis/shoot订阅---------------- */
@@ -130,6 +155,8 @@ typedef struct
     // 控制部分
     float vx;           // 前进方向速度
     float vy;           // 横移方向速度
+    float vx_dir;       // 前进方向原始速度
+    float vy_dir;       // 横移方向原始速度
     float wz;           // 旋转速度
     float offset_angle; // 底盘和归中位置的夹角
     chassis_mode_e chassis_mode;
@@ -148,6 +175,7 @@ typedef struct
     AutoAim_mode_e autoaim_mode;
     gimbal_mode_e gimbal_mode;
     float last_deep;               // cached copy of Vision.can_fire (offline detection)
+    uint8_t Death_reInit;          // 死亡重初始化标志
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -178,6 +206,8 @@ typedef struct
 {
     attitude_t gimbal_imu_data;
     uint16_t yaw_motor_single_round_angle;
+    float offset_diff;   // 云台与底盘偏角差
+    float pitch_angle;   // pitch电机角度
     uint8_t cmd_error_flag;
     float init_location;
 } Gimbal_Upload_Data_s;
