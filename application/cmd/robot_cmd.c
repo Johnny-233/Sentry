@@ -359,7 +359,7 @@ static void MidRoundPatrol()
 
 static void Sentry_ChassisAC()
 {
-    chassis_cmd_send.vx = minipc_recv_data->Vision.linear_velocity_x * 4.0f * REDUCTION_RATIO_WHEEL * 360.0f / PERIMETER_WHEEL * 1000.0f;
+    chassis_cmd_send.vx = -minipc_recv_data->Vision.linear_velocity_x * 4.0f * REDUCTION_RATIO_WHEEL * 360.0f / PERIMETER_WHEEL * 1000.0f;
     chassis_cmd_send.vy = -minipc_recv_data->Vision.linear_velocity_y * 4.0f * REDUCTION_RATIO_WHEEL * 360.0f / PERIMETER_WHEEL * 1000.0f;
 
     if (minipc_recv_data->Vision.gimbal_mode != 0)
@@ -376,7 +376,7 @@ static void Sentry_ChassisAC()
     }
     else
     {
-        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
     }
 }
 
