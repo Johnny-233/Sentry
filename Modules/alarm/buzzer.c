@@ -1,6 +1,7 @@
 #include "bsp_pwm.h"
 #include "buzzer.h"
 #include "bsp_dwt.h"
+#include "bsp_log.h"
 #include "string.h"
 
 static PWMInstance *buzzer;
@@ -24,10 +25,17 @@ void BuzzerInit()
 
 BuzzzerInstance *BuzzerRegister(Buzzer_config_s *config)
 {
-    if (config->alarm_level > BUZZER_DEVICE_CNT) // 超过最大实例数,考虑增加或查看是否有内存泄漏
-        while (1)
-            ;
+    if (config == NULL || config->alarm_level >= BUZZER_DEVICE_CNT) // 等级非法或超上限(合法 0~BUZZER_DEVICE_CNT-1, 原来是 > 会放过越界值)
+    {
+        LOGERROR("[buzzer] invalid alarm_level [%d], register failed", config == NULL ? -1 : (int)config->alarm_level);
+        return NULL;
+    }
     BuzzzerInstance *buzzer_temp = (BuzzzerInstance *)malloc(sizeof(BuzzzerInstance));
+    if (buzzer_temp == NULL)
+    {
+        LOGERROR("[buzzer] malloc failed, register failed");
+        return NULL;
+    }
     memset(buzzer_temp, 0, sizeof(BuzzzerInstance));
 
     buzzer_temp->alarm_level = config->alarm_level;
@@ -50,6 +58,8 @@ void BuzzerTask()
     for (size_t i = 0; i < BUZZER_DEVICE_CNT; ++i)
     {
         buzz = buzzer_list[i];
+        if (buzz == NULL) // 该等级未注册实例: 直接跳过(修复空指针解引用)
+            continue;
         if (buzz->alarm_level > ALARM_LEVEL_LOW)
         {
             continue;
