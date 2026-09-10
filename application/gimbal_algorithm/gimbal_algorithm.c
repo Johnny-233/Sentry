@@ -1,25 +1,24 @@
 #include "gimbal_algorithm.h"
 #include "ins_task.h"
-static GimbalAlgorithm_t gimbal_algorithm;
+static GimbalAlgorithm_t gimbal_algorithm_yaw;
+static GimbalAlgorithm_t gimbal_algorithm_pitch;
 
 /**
  * @brief 方向变化检测函数
- * @param current_cmd_delta 当前指令变化量
- * @param current_time 当前时间(ms)
  */
 static void DetectDirectionChange(GimbalAlgorithm_t *gimbal)
 {
-    float current_cmd_delta  =    gimbal->yaw_cmd_delta;
+    float current_cmd_delta  =    gimbal->cmd_delta;
     float last_cmd_delta     =    gimbal->last_cmd_delta;
     float current_time       =    gimbal->current_time;
 
     // 方向变化检测（三角波拐点）
-    if (current_cmd_delta * last_cmd_delta < 0 && fabsf(current_cmd_delta) > 0.1f) 
+    if (current_cmd_delta * last_cmd_delta < 0 && fabsf(current_cmd_delta) > 0.1f)
     {
         gimbal->direction_changed = true;
         gimbal->last_direction_change_time = current_time;
-    } 
-    else 
+    }
+    else
     {
         // 方向变化后一段时间内仍认为在拐点
         if (current_time - gimbal->last_direction_change_time > 200.0f) {
@@ -28,117 +27,129 @@ static void DetectDirectionChange(GimbalAlgorithm_t *gimbal)
     }
 }
 
-
 /**
- * @brief 云台偏航轴自适应跟随控制
- * @param gimbal_IMU_data 云台IMU数据
- * @param gimbal_cmd_recv 云台控制指令
+ * @brief 自适应跟随控制核心（通用，由调用方指定实例和轴）
+ * @param is_pitch true=Pitch轴(温和参数), false=Yaw轴(快速响应)
  */
-float Cal_FollowControl_Set(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv) 
+static float Cal_FollowControl_Internal(GimbalAlgorithm_t *gimbal, attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv, float imu_angle, float imu_gyro, float cmd_value, bool is_pitch)
 {
     // 获取当前时间和角度
-    gimbal_algorithm.current_time = DWT_GetTimeline_ms();
-    gimbal_algorithm.current_yaw = gimbal_IMU_data.YawTotalAngle;
-    gimbal_algorithm.yaw_cmd = gimbal_cmd_recv.yaw;
-    
+    gimbal->current_time = DWT_GetTimeline_ms();
+    gimbal->current_angle = imu_angle;
+    gimbal->cmd = cmd_value;
+
     // 计算指令变化量
-    gimbal_algorithm.yaw_cmd_delta = gimbal_algorithm.yaw_cmd - gimbal_algorithm.yaw_last_cmd;
-    
+    gimbal->cmd_delta = gimbal->cmd - gimbal->last_cmd;
+
     // 方向变化检测
-    DetectDirectionChange(&gimbal_algorithm);
+    DetectDirectionChange(gimbal);
 
     // 计算误差
-    gimbal_algorithm. yaw_error = gimbal_algorithm.yaw_cmd  -  gimbal_algorithm.current_yaw ;
-    gimbal_algorithm. yaw_error_rate = 0 - gimbal_IMU_data.Gyro[2];  
-    
-    // 自适应滤波参数选择
-    gimbal_algorithm.filter_factor = DEFAULT_FILTER_FACTOR; // 默认滤波系数
-    
-    if (fabsf(gimbal_algorithm.yaw_cmd_delta) > 10.0f) 
-    {
-        // 阶跃信号：降低滤波强度，快速响应
-        gimbal_algorithm. filter_factor = STEP_FILTER_FACTOR;
-        gimbal_algorithm.flag = 1;
-    }
-    else if (gimbal_algorithm.direction_changed) 
-    {
-        // 三角波拐点：中等滤波，适当前馈
-        gimbal_algorithm.filter_factor = CORNER_FILTER_FACTOR;
-        gimbal_algorithm.flag = 2;
-    }
-    else if (fabsf(gimbal_algorithm.yaw_cmd_delta) > 0.8f)
-    {
-        // 快速连续变化（三角波线性段）
-        gimbal_algorithm.filter_factor = FAST_FILTER_FACTOR;
-        gimbal_algorithm.flag = 3;
-    }
-    else 
-    {
-        // 微小变化或静止：强滤波
-        gimbal_algorithm.filter_factor = SLOW_FILTER_FACTOR;
-        gimbal_algorithm.flag = 0;
-    }
-    
-    // 静态误差累积（仅在静止或微小变化时）
-    if (fabsf(gimbal_algorithm.yaw_cmd_delta) < 0.2f) 
-    {
-        if (fabsf(gimbal_algorithm.yaw_error) > 0.3f && fabsf(gimbal_algorithm.yaw_error_rate) < 0.02f)
-        {
-            gimbal_algorithm.yaw_static_error_accumulator += gimbal_algorithm.yaw_error * 0.001f;
-            // 限幅
-            gimbal_algorithm.yaw_static_error_accumulator = fmaxf(-0.3f, fminf(gimbal_algorithm.yaw_static_error_accumulator, 0.3f));
-        }
-    }
-    else 
-    {
-        // 动态时清空静态误差累积
-        gimbal_algorithm.yaw_static_error_accumulator *= 0.001f;  // 逐渐衰减
-    }
-    
-    // 应用滤波
-    gimbal_algorithm.yaw_filtered_cmd = gimbal_algorithm.filter_factor * gimbal_algorithm.yaw_cmd + (1.0f - gimbal_algorithm.filter_factor) * gimbal_algorithm.yaw_filtered_cmd;
-    
-    // 添加静态误差补偿
-    gimbal_algorithm.yaw_filtered_cmd += gimbal_algorithm.yaw_static_error_accumulator;
-    
-    // 更新历史变量
-    gimbal_algorithm.yaw_last_cmd =  gimbal_algorithm.yaw_cmd;
-    gimbal_algorithm.last_cmd_delta =  gimbal_algorithm.yaw_cmd_delta;
+    gimbal->error = gimbal->cmd - gimbal->current_angle;
+    gimbal->error_rate = 0 - imu_gyro;
 
-    return gimbal_algorithm.yaw_filtered_cmd;
-}
+    // 自适应滤波参数选择 —— Pitch/Yaw 使用不同的阈值和系数
+    gimbal->filter_factor = DEFAULT_FILTER_FACTOR;
 
-float Cal_FollowControl_Feedforward(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv) 
-{
-    // 计算前馈
-    gimbal_algorithm.feedforward = DEFAULT_FEEDFORWARD_FACTOR;
-    
-    if (fabsf(gimbal_algorithm.yaw_cmd_delta) > 2.0f && fabsf(gimbal_algorithm.yaw_cmd_delta) < 5.0f) 
+    float step_threshold   = is_pitch ? PITCH_STEP_THRESHOLD   : 10.0f;
+    float fast_threshold   = is_pitch ? PITCH_FAST_THRESHOLD   : 0.8f;
+    float step_filter      = is_pitch ? PITCH_STEP_FILTER_FACTOR    : STEP_FILTER_FACTOR;
+    float corner_filter    = is_pitch ? PITCH_CORNER_FILTER_FACTOR  : CORNER_FILTER_FACTOR;
+    float fast_filter      = is_pitch ? PITCH_FAST_FILTER_FACTOR    : FAST_FILTER_FACTOR;
+    float slow_filter      = is_pitch ? PITCH_SLOW_FILTER_FACTOR    : SLOW_FILTER_FACTOR;
+
+    if (fabsf(gimbal->cmd_delta) > step_threshold)
     {
-        // 三角波线性段
-        gimbal_algorithm.feedforward = gimbal_algorithm.yaw_cmd_delta * FAST_FEEDFORWARD_FACTOR;
+        gimbal->filter_factor = step_filter;
+        gimbal->flag = 1;
     }
-    else if (fabsf(gimbal_algorithm.yaw_cmd_delta) >= 15.0f) 
+    else if (gimbal->direction_changed)
     {
-        // 大幅变化（阶跃）
-        gimbal_algorithm.feedforward = gimbal_algorithm.yaw_error * STEP_FEEDFORWARD_FACTOR;
+        gimbal->filter_factor = corner_filter;
+        gimbal->flag = 2;
+    }
+    else if (fabsf(gimbal->cmd_delta) > fast_threshold)
+    {
+        gimbal->filter_factor = fast_filter;
+        gimbal->flag = 3;
     }
     else
     {
-        if (fabsf(gimbal_algorithm.yaw_error) > 0.2f) 
-        {
-            // 小变化但有误差
-            gimbal_algorithm.feedforward = gimbal_algorithm.yaw_error * SLOW_FEEDFORWARD_FACTOR;
-        }
-        
+        gimbal->filter_factor = slow_filter;
+        gimbal->flag = 0;
     }
 
-    // 拐点处适当减小前馈
-    if (gimbal_algorithm.direction_changed) 
+    // 静态误差累积（仅在静止或微小变化时）
+    if (fabsf(gimbal->cmd_delta) < 0.2f)
     {
-        gimbal_algorithm.feedforward *= CORNER_FEEDFORWARD_FACTOR;
+        if (fabsf(gimbal->error) > 0.3f && fabsf(gimbal->error_rate) < 0.02f)
+        {
+            gimbal->static_error_accumulator += gimbal->error * 0.001f;
+            gimbal->static_error_accumulator = fmaxf(-0.3f, fminf(gimbal->static_error_accumulator, 0.3f));
+        }
     }
-    
-    return gimbal_algorithm.feedforward;
+    else
+    {
+        gimbal->static_error_accumulator *= 0.001f;
+    }
+
+    // 应用滤波
+    gimbal->filtered_cmd = gimbal->filter_factor * gimbal->cmd + (1.0f - gimbal->filter_factor) * gimbal->filtered_cmd;
+
+    // 添加静态误差补偿
+    gimbal->filtered_cmd += gimbal->static_error_accumulator;
+
+    // 更新历史变量
+    gimbal->last_cmd = gimbal->cmd;
+    gimbal->last_cmd_delta = gimbal->cmd_delta;
+
+    return gimbal->filtered_cmd;
 }
 
+/**
+ * @brief 云台偏航轴自适应跟随控制
+ */
+float Cal_FollowControl_Set_Yaw(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv)
+{
+    return Cal_FollowControl_Internal(&gimbal_algorithm_yaw, gimbal_IMU_data, gimbal_cmd_recv,
+        gimbal_IMU_data.YawTotalAngle, gimbal_IMU_data.Gyro[2], gimbal_cmd_recv.yaw, false);
+}
+
+/**
+ * @brief 云台俯仰轴自适应跟随控制（使用 Pitch 专用温和参数）
+ */
+float Cal_FollowControl_Set_Pitch(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv)
+{
+    return Cal_FollowControl_Internal(&gimbal_algorithm_pitch, gimbal_IMU_data, gimbal_cmd_recv,
+        gimbal_IMU_data.Pitch, gimbal_IMU_data.Gyro[1], gimbal_cmd_recv.pitch, true);
+}
+
+float Cal_FollowControl_Feedforward(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv)
+{
+    GimbalAlgorithm_t *gimbal = &gimbal_algorithm_yaw;
+
+    gimbal->feedforward = DEFAULT_FEEDFORWARD_FACTOR;
+
+    if (fabsf(gimbal->cmd_delta) > 2.0f && fabsf(gimbal->cmd_delta) < 5.0f)
+    {
+        gimbal->feedforward = gimbal->cmd_delta * FAST_FEEDFORWARD_FACTOR;
+    }
+    else if (fabsf(gimbal->cmd_delta) >= 15.0f)
+    {
+        gimbal->feedforward = gimbal->error * STEP_FEEDFORWARD_FACTOR;
+    }
+    else
+    {
+        if (fabsf(gimbal->error) > 0.2f)
+        {
+            gimbal->feedforward = gimbal->error * SLOW_FEEDFORWARD_FACTOR;
+        }
+    }
+
+    if (gimbal->direction_changed)
+    {
+        gimbal->feedforward *= CORNER_FEEDFORWARD_FACTOR;
+    }
+
+    return gimbal->feedforward;
+}

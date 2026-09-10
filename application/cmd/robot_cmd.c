@@ -207,12 +207,41 @@ void FoundEnermy()
     {
         float target_yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle - yaw_err;
         gimbal_cmd_send.yaw = target_yaw;
-        gimbal_cmd_send.yaw = Cal_FollowControl_Set(gimbal_fetch_data.gimbal_imu_data, gimbal_cmd_send);
+        gimbal_cmd_send.yaw = Cal_FollowControl_Set_Yaw(gimbal_fetch_data.gimbal_imu_data, gimbal_cmd_send);
     }
     /* |误差| ≤ 0.3°: 死区锁死 */
 
-    /* pitch跟踪 */
-    gimbal_cmd_send.pitch += 0.0008f * minipc_recv_data->Vision.pitch;  // 0.0011->0.0005 减缓噪声累积
+    /* pitch: 自适应滤波增量式 — 对视觉误差做滤波,保持在编码器坐标系 */
+    {
+        static float err_filtered = 0;
+        static float err_last = 0;
+        float raw_err = minipc_recv_data->Vision.pitch;
+
+        if (fabsf(raw_err) > 0.3f)
+        {
+            // 根据误差变化量自适应选择滤波强度
+            float err_delta = raw_err - err_last;
+            float alpha;
+
+            if (fabsf(err_delta) > 0.5f)
+                alpha = 0.3f;    // 大跳变: 快速跟上
+            else if (fabsf(err_delta) > 0.05f)
+                alpha = 0.2f;    // 跟踪中: 中等响应
+            else
+                alpha = 0.1f;    // 微调: 强滤波抑制噪声
+
+            err_filtered = alpha * raw_err + (1.0f - alpha) * err_filtered;
+            err_last = raw_err;
+
+            // 增量式控制, 增益可安全设高
+            gimbal_cmd_send.pitch += 0.0005f * err_filtered;
+        }
+        else
+        {
+            err_last = 0;
+        }
+    }
+    /* |误差| ≤ 0.5°: 死区锁死 */
 }
 
 
@@ -404,24 +433,33 @@ static void Sentry_GimbalAC()
     if (DataLebel.vision_flag == 0)
     {
         DataLebel.t_pitch = (float)DWT_GetTimeline_s();
-        PIT = 0.2f * sinf(10.0f * DataLebel.t_pitch) - 0.35;
-        GimbalPitchLimit();
+        // 巡逻pitch摆动铺满整个限位窗口: 中心=(MAX+MIN)/2, 幅值=半程, 由宏推出自动适配
+        PIT = sinf(10.0f * DataLebel.t_pitch)
+                * (PITCH_MAX_ANGLE - PITCH_MIN_ANGLE) * 0.5f
+            + (PITCH_MAX_ANGLE + PITCH_MIN_ANGLE) * 0.5f;
 
-        if (fabs(PP_Motor->measure.angle - PIT) >= 0.1 && DataLebel.ACEntryPoint)
+        if (DataLebel.ACEntryPoint)
         {
-            gimbal_cmd_send.pitch = 0.5f * PIT;
-            if (fabs(PP_Motor->measure.angle - PIT) <= 0.01)
+            // 平滑进入: 从当前实际角度按每周期限步长逼近PIT, 避免停机恢复时硬跳/撞限位
+            const float entry_step = 0.02f; // rad/周期(200Hz下约4rad/s), 略大于摆扫速率使其能追上
+            float cur = PP_Motor->measure.angle;
+            float err = PIT - cur;
+            if (fabsf(err) <= entry_step)
             {
+                gimbal_cmd_send.pitch = PIT; // 已跟上目标, 退出平滑进入稳态
                 DataLebel.ACEntryPoint = 0;
             }
-            RoundPatrol();
+            else
+            {
+                gimbal_cmd_send.pitch = cur + copysignf(entry_step, err);
+            }
         }
         else
         {
             gimbal_cmd_send.pitch = PIT;
-            DataLebel.ACEntryPoint = 0;
-            RoundPatrol();
         }
+        GimbalPitchLimit(); // 兜底限位(在赋值之后)
+        RoundPatrol();
         gimbal_cmd_send.autoaim_mode = AUTO_OFF;
     }
     else

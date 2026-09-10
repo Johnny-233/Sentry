@@ -87,10 +87,10 @@ MIMotorInstance *MIMotorInit(Motor_Init_Config_s *config)
     motor->motor_controller.other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
     motor->motor_controller.current_feedforward_ptr = config->controller_param_init_config.current_feedforward_ptr;
     motor->motor_controller.speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
-    motor->motor_can_instace->ext_flag=config->can_init_config.ext_flag;
-    config->can_init_config.can_module_callback = DecodeMiMotor; 
-    config->can_init_config.id = motor;                       
+    config->can_init_config.can_module_callback = DecodeMiMotor;
+    config->can_init_config.id = motor;
     motor->motor_can_instace = CANRegister(&config->can_init_config);
+    motor->motor_can_instace->ext_flag = config->can_init_config.ext_flag;
     mi_motor_instance[idx++] = motor;
     return motor;
 }

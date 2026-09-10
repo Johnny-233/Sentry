@@ -67,8 +67,8 @@ void GimbalInit()
         },
         .controller_param_init_config={
             .angle_PID={
-                .Kp=15,  // 10->15 补偿积分增益降低
-                .Kd=1.0,  // 0.35->1.0 增加阻尼抑制微振
+                .Kp=15,  // 15
+                .Kd=1.0,  
                 .FF_Gain = 0.0,
             },
             .speed_PID={
@@ -81,8 +81,7 @@ void GimbalInit()
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
     yaw_motor = DJIMotorInit(&yaw_config);
     pitch_motor = MIMotorInit(&pitch_config);
-    //MIMotorModeSwitch(pitch_motor,1);
-    //MIMotorSetPid(pitch_motor,pitch_motor->motor_controller.angle_PID.Kp,4,pitch_motor->motor_controller.speed_PID.Kp,pitch_motor->motor_controller.speed_PID.Ki);
+    MIMotorEnable(pitch_motor);
     MIMotorInstanceetMechPositionToZero(pitch_motor);
 
     
@@ -100,23 +99,23 @@ static void GimbalStateSet()
         DJIMotorStop(yaw_motor);
         motor_init=0;
         break;
-    case GIMBAL_GYRO_MODE: 
+    case GIMBAL_GYRO_MODE:
         DJIMotorEnable(yaw_motor);
         DJIMotorSetRef(yaw_motor,gimbal_cmd_recv.yaw);
         MI_motor_LocationControl(pitch_motor,gimbal_cmd_recv.pitch,pitch_motor->motor_controller.angle_PID.Kp,pitch_motor->motor_controller.angle_PID.Kd);
         if(motor_init==0)
         {
-            //MIMotorModeSwitch(pitch_motor,1);
             MIMotorEnable(pitch_motor);
-            gimbal_feedback_data.init_location=gimbal_IMU_data->Pitch;
-
-            //MIMotorSetPid(pitch_motor,pitch_motor->motor_controller.angle_PID.Kp,4,pitch_motor->motor_controller.speed_PID.Kp,pitch_motor->motor_controller.speed_PID.Ki);
+            // 清除yaw PID积分,防止停机期间积分windup导致使能瞬间过流
+            PIDInstance *ap = &yaw_motor->motor_controller.angle_PID;
+            PIDInstance *sp = &yaw_motor->motor_controller.speed_PID;
+            ap->ITerm = 0; ap->Iout = 0; ap->Last_ITerm = 0;
+            sp->ITerm = 0; sp->Iout = 0; sp->Last_ITerm = 0;
+            // 以当前角度初始化pid_ref,避免阶跃
+            yaw_motor->motor_controller.pid_ref = gimbal_IMU_data->YawTotalAngle;
+            gimbal_feedback_data.init_location = gimbal_IMU_data->Pitch;
             motor_init=1;
         }
-        /*
-        else
-        MiMotorSetRef(pitch_motor,gimbal_cmd_recv.pitch);
-        */
         break;
     default:
         break;
