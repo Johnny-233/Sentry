@@ -91,10 +91,12 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
  * @brief 对sbus_to_rc的简单封装,用于注册到bsp_usart的回调函数中
  *
  */
-static void RemoteControlRxCallback()
+static void RemoteControlRxCallback(USARTInstance *instance, uint16_t len)
 {
-    DaemonReload(rc_daemon_instance);         // 先喂狗
-    sbus_to_rc(rc_usart_instance->recv_buff); // 进行协议解析
+    DaemonReload(rc_daemon_instance); // 先喂狗
+    if (len < REMOTE_CONTROL_FRAME_SIZE) // 长度不足一帧(半包/噪声): 丢弃, 否则会解析到上一包残留
+        return;
+    sbus_to_rc(instance->recv_buff); // 进行协议解析
 }
 
 /**

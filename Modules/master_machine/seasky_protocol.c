@@ -3,6 +3,8 @@
 #include "crc8.h"
 #include "crc16.h"
 #include "memory.h"
+#include <math.h>
+#include "bsp_log.h"
 
 static Minipc_Recv_s minipc_recv_data;
 /*获取CRC8校验码*/
@@ -87,27 +89,67 @@ void get_protocol_send_Vision_data(uint16_t send_id,        // 信号id
     此函数用于处理接收数据，
     返回数据内容的id
 */
-void get_protocol_info_vision(uint8_t *rx_buf, 
-                           uint16_t *flags_register, 
-                        Minipc_Recv_s *recv_data)
+/* 视觉(小电脑)回传帧固定长度: header(1) + 6个4字节字段(24) + CRC16(2) = 27 */
+#define VISION_RX_FRAME_LEN 27u
+/* CRC16 校验开关: 正常必须为 1。若现场发现小电脑端未按同一 CRC 发送(下面的错误计数会持续增长),
+ * 可临时置 0 只做长度校验并同步修正 PC 端, 不要把 0 带上场。 */
+#define VISION_RX_CRC_CHECK 1
+
+void get_protocol_info_vision(uint8_t *rx_buf,
+                           uint16_t len,
+                           uint16_t *flags_register,
+                           Minipc_Recv_s *recv_data)
 {
-    static protocol_rm_struct pro;
-    static uint16_t date_length;
+    static uint32_t crc_fail_cnt = 0;
+    static uint32_t len_fail_cnt = 0;
+    static uint32_t nan_fail_cnt = 0;
 
-    if (protocol_heade_Check(&pro, rx_buf)==1) 
+    if (rx_buf == NULL || recv_data == NULL)
+        return;
+
+    /* 长度校验: 原来没有任何长度校验, 只要首字节是 0x5A 就把缓冲区里 27 字节全部采信,
+     * 短包/半包时会解析到上一包残留数据。 */
+    if (len < VISION_RX_FRAME_LEN)
     {
-        date_length = OFFSET_BYTE + pro.header.data_length;
-        //if (CRC16_Check_Sum(rx_buf, date_length)) {
-            *flags_register = (rx_buf[7] << 8) | rx_buf[6];
-
-            // 将接收到的数据复制到Minipc_Recv_s结构体中
-            recv_data->Vision.header = rx_buf[0];
-            memcpy(&recv_data->Vision.linear_velocity_x, &rx_buf[1], sizeof(float));
-            memcpy(&recv_data->Vision.linear_velocity_y, &rx_buf[5], sizeof(float));
-            memcpy(&recv_data->Vision.gimbal_mode, &rx_buf[9], sizeof(int32_t));
-            memcpy(&recv_data->Vision.yaw, &rx_buf[13], sizeof(float));
-            memcpy(&recv_data->Vision.pitch, &rx_buf[17], sizeof(float));
-            memcpy(&recv_data->Vision.can_fire, &rx_buf[21], sizeof(int32_t));
-            recv_data->Vision.checksum = (rx_buf[25] << 8) | rx_buf[26];
+        if ((++len_fail_cnt % 100u) == 0u)
+            LOGERROR("[vision] short frame len=%u (<%u), dropped %u", (unsigned)len, (unsigned)VISION_RX_FRAME_LEN, (unsigned)len_fail_cnt);
+        return;
     }
+
+    if (rx_buf[0] != PROTOCOL_CMD_ID)
+        return;
+
+#if VISION_RX_CRC_CHECK
+    /* CRC16 覆盖前 25 字节, 校验值在最后 2 字节(小端), 与发送端 get_protocol_send_Vision_data 的约定一致 */
+    if (!CRC16_Check_Sum(rx_buf, VISION_RX_FRAME_LEN))
+    {
+        if ((++crc_fail_cnt % 100u) == 0u)
+            LOGERROR("[vision] CRC16 mismatch on %u frames, check the PC-side protocol", (unsigned)crc_fail_cnt);
+        return;
+    }
+#endif
+
+    /* 先解析到临时变量: 校验不通过时不污染 recv_data(视觉数据直接进云台/开火逻辑) */
+    Minipc_Recv_s tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    *flags_register = (rx_buf[7] << 8) | rx_buf[6];
+    tmp.Vision.header = rx_buf[0];
+    memcpy(&tmp.Vision.linear_velocity_x, &rx_buf[1], sizeof(float));
+    memcpy(&tmp.Vision.linear_velocity_y, &rx_buf[5], sizeof(float));
+    memcpy(&tmp.Vision.gimbal_mode, &rx_buf[9], sizeof(int32_t));
+    memcpy(&tmp.Vision.yaw, &rx_buf[13], sizeof(float));
+    memcpy(&tmp.Vision.pitch, &rx_buf[17], sizeof(float));
+    memcpy(&tmp.Vision.can_fire, &rx_buf[21], sizeof(int32_t));
+    tmp.Vision.checksum = (rx_buf[25] << 8) | rx_buf[26];
+
+    /* NaN/Inf 防护: 这些浮点会被直接当作云台目标与速度指令使用 */
+    if (!isfinite(tmp.Vision.linear_velocity_x) || !isfinite(tmp.Vision.linear_velocity_y) ||
+        !isfinite(tmp.Vision.yaw) || !isfinite(tmp.Vision.pitch))
+    {
+        if ((++nan_fail_cnt % 100u) == 0u)
+            LOGERROR("[vision] non-finite float in frame, dropped %u", (unsigned)nan_fail_cnt);
+        return;
+    }
+
+    *recv_data = tmp;
 }

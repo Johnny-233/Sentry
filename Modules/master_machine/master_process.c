@@ -47,11 +47,11 @@ static void VisionOfflineCallback(void *id)
  * @todo  1.提高可读性,将get_protocol_info的第四个参数增加一个float类型buffer
  *        2.添加标志位解码
  */
-static void DecodeMinpc()
+static void DecodeMinpc(USARTInstance *instance, uint16_t len)
 {
     uint16_t flag_register;
     DaemonReload(minipc_daemon_instance); // 喂狗
-    get_protocol_info_vision(minipc_usart_instance->recv_buff, &flag_register,&minipc_recv_data);
+    get_protocol_info_vision(instance->recv_buff, len, &flag_register, &minipc_recv_data);
 }
 
 Minipc_Recv_s *minipcInit(UART_HandleTypeDef *_handle)

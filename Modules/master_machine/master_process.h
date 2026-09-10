@@ -126,8 +126,12 @@ void get_protocol_send_Vision_data(uint16_t send_id,        // 信号id
 
 
 
-void get_protocol_info_vision(uint8_t *rx_buf, 
-                           uint16_t *flags_register, 
+/* 解析视觉(小电脑)回传帧
+ * @param len 本次实际接收字节数: 必须 >= 一帧长度, 否则直接丢弃(避免解析到上一包残留)
+ */
+void get_protocol_info_vision(uint8_t *rx_buf,
+                           uint16_t len,
+                           uint16_t *flags_register,
                            Minipc_Recv_s *recv_data);
 
 						   void VisionSetAltitude();

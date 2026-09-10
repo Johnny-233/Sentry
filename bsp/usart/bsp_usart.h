@@ -7,8 +7,13 @@
 #define DEVICE_USART_CNT 3     // C板至多分配3个串口
 #define USART_RXBUFF_LIMIT 256 // 如果协议需要更大的buff,请修改这里
 
-// 模块回调函数,用于解析协议
-typedef void (*usart_module_callback)();
+/* 模块回调函数,用于解析协议
+ * @param instance 触发回调的串口实例
+ * @param len      本次实际接收到的字节数(HAL_UARTEx_RxEventCallback 的 Size)
+ *                 模块必须用它做长度校验: 短包/半包时缓冲区里可能是上一包的残留, 不能无条件解析
+ */
+struct _usart_instance;
+typedef void (*usart_module_callback)(struct _usart_instance *instance, uint16_t len);
 
 /* 发送模式枚举 */
 typedef enum
@@ -21,7 +26,7 @@ typedef enum
 
 // 串口实例结构体,每个module都要包含一个实例.
 // 由于串口是独占的点对点通信,所以不需要考虑多个module同时使用一个串口的情况,因此不用加入id;当然也可以选择加入,这样在bsp层可以访问到module的其他信息
-typedef struct
+typedef struct _usart_instance
 {
     uint8_t recv_buff[USART_RXBUFF_LIMIT]; // 预先定义的最大buff大小,如果太小请修改USART_RXBUFF_LIMIT
     uint8_t recv_buff_size;                // 模块接收一包数据的大小
