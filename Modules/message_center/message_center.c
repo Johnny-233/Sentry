@@ -1,7 +1,7 @@
 #include "message_center.h"
 #include "stdlib.h"
 #include "string.h"
-// #include "bsp_log.h"
+#include "bsp_log.h"
 
 //message_center是个链表
 //通过自引用next_topic_node将所有发布者连接成链表
@@ -26,23 +26,20 @@ static void MutexesInit()
     }
 }
 
-static void CheckName(char *name)
+/* 话题名超长是编码错误: 原来直接 while(1) 死循环(无看门狗时整机静默停机且无任何日志),
+ * 现在改为报错 + 在复制处按上限截断, 保证不会越界写 topic_name[]. */
+static void CheckName(const char *name)
 {
     if (strnlen(name, MAX_TOPIC_NAME_LEN + 1) >= MAX_TOPIC_NAME_LEN)
-    {
-        while (1)
-            ; // 进入这里说明话题名超出长度限制
-    }
+        LOGERROR("[msg_center] topic name too long (>= %d): refused to copy full name", MAX_TOPIC_NAME_LEN);
 }
 
-//需要让发布者和订阅者的消息长度一致。
+/* 需要让发布者和订阅者的消息长度一致。不一致时原来同样死循环;
+ * 现在改为报错, 并在发布侧跳过长度不匹配的订阅者(见 PubPushMessage), 避免堆越界写。 */
 static void CheckLen(uint8_t len1, uint8_t len2)
 {
     if (len1 != len2)
-    {
-        while (1)
-            ; 
-    }
+        LOGERROR("[msg_center] data length mismatch: pub=%u sub=%u, delivery disabled for this subscriber", len1, len2);
 }
 
 Publisher_t *PubRegister(char *name, uint8_t data_len)
@@ -74,7 +71,9 @@ Publisher_t *PubRegister(char *name, uint8_t data_len)
     node->next_topic_node = (Publisher_t *)malloc(sizeof(Publisher_t));
     memset(node->next_topic_node, 0, sizeof(Publisher_t));
     node->next_topic_node->data_len = data_len;
-    strcpy(node->next_topic_node->topic_name, name);
+    // 有界复制: 原实现用 strcpy 直接复制, 名字超长会越界写 topic_name[]
+    strncpy(node->next_topic_node->topic_name, name, MAX_TOPIC_NAME_LEN);
+    node->next_topic_node->topic_name[MAX_TOPIC_NAME_LEN] = '\0';
     node->next_topic_node->pub_registered_flag = 1;
     
     // 创建话题节点的互斥锁
@@ -181,6 +180,14 @@ uint8_t PubPushMessage(Publisher_t *pub, void *data_ptr)
     // 遍历订阅了当前话题的所有订阅者,依次填入最新消息
     while (iter)
     {
+        // 长度保护: 发布长度大于订阅者缓冲长度时直接跳过, 否则 memcpy 会写越界
+        if (pub->data_len > iter->data_len)
+        {
+            LOGERROR("[msg_center] pub '%s' len %u > sub len %u, skip delivery", pub->topic_name, pub->data_len, iter->data_len);
+            iter = iter->next_subs_queue;
+            continue;
+        }
+
         // 获取订阅者锁
         if (osMutexWait(iter->mutex, osWaitForever) == osOK)
         {

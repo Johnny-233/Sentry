@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bsp_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,15 +103,37 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
+/* 故障现场: 供调试器/日志查看(原实现用 asm("bx lr") 立即从异常返回, 会不断重入故障指令,
+ * 现象是"静默卡死且 PC 乱跳", 既没有日志也无法定位) */
+volatile uint32_t g_fault_cfsr = 0;
+volatile uint32_t g_fault_hfsr = 0;
+volatile uint32_t g_fault_bfar = 0;
+volatile uint32_t g_fault_mmfar = 0;
+
+/* 1: 无调试器时自动复位(推荐, 避免整机静默停机); 0: 停在 while(1) 等调试器 */
+#define FAULT_AUTO_RESET 1
+
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-  asm("bx lr");
+  g_fault_cfsr = SCB->CFSR;
+  g_fault_hfsr = SCB->HFSR;
+  g_fault_bfar = SCB->BFAR;
+  g_fault_mmfar = SCB->MMFAR;
+
+  LOGERROR("[fault] HardFault! CFSR=0x%08X HFSR=0x%08X BFAR=0x%08X MMFAR=0x%08X",
+           (unsigned)g_fault_cfsr, (unsigned)g_fault_hfsr, (unsigned)g_fault_bfar, (unsigned)g_fault_mmfar);
+
+#if FAULT_AUTO_RESET
+  if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) == 0u) // 没有调试器挂着 -> 复位重启
+  {
+    NVIC_SystemReset();
+  }
+#endif
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    asm("bx lr");
     /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }

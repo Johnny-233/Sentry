@@ -5,6 +5,7 @@
 #include "message_center.h"
 #include "bsp_dwt.h"
 #include "general_def.h"
+#include "bsp_log.h"
 
 /* 对于双发射机构的机器人,将下面的数据封装成结构体即可,生成两份shoot应用实例 */
 static DJIMotorInstance *friction_l, *friction_r, *loader; // 拨盘电机
@@ -137,8 +138,12 @@ static void ShootRateSet()
         DJIMotorSetRef(loader, -1000);
         break;
     default:
-        while (1)
-            ; // 未知模式,停止运行,检查指针越界,内存溢出等问题
+        // 未知模式: 原来在这里 while(1) 会把整个 RobotTask 卡死(电机保持最后指令且无看门狗可救),
+        // 现在改为"停机 + 报错": 拨盘停止输出, 并回到 LOAD_STOP 状态
+        LOGERROR("[shoot] unknown loader_mode [%d], force LOAD_STOP", (int)shoot_cmd_recv.loader_mode);
+        DJIMotorStop(loader);
+        shoot_cmd_recv.loader_mode = LOAD_STOP;
+        break;
     }
 }
 
