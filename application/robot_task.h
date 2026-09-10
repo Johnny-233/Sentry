@@ -16,6 +16,15 @@
 
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "bsp_iwdg.h"
+
+/* ---- 看门狗心跳 ----
+ * 每个持续运行的任务在自己的循环里置位; daemon 任务(100Hz)确认三个控制任务都推进过才喂狗,
+ * 任一控制任务卡死 -> 1s 内不再喂狗 -> IWDG 硬件复位。UI 任务不参与(它卡住不应导致整车复位)。
+ */
+static volatile uint8_t iwdg_alive_ins = 0;
+static volatile uint8_t iwdg_alive_motor = 0;
+static volatile uint8_t iwdg_alive_robot = 0;
 
 osThreadId insTaskHandle;
 osThreadId robotTaskHandle;
@@ -61,6 +70,7 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
     for (;;)
     {
         // 1kHz
+        iwdg_alive_ins = 1; // 心跳: 供 daemon 任务判定本任务是否卡死
         ins_start = DWT_GetTimeline_ms();
         INS_Task();
         ins_dt = DWT_GetTimeline_ms() - ins_start;
@@ -78,6 +88,7 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
     LOGINFO("[freeRTOS] MOTOR Task Start");
     for (;;)
     {
+        iwdg_alive_motor = 1; // 心跳
         motor_start = DWT_GetTimeline_ms();
         MotorControlTask();
         motor_dt = DWT_GetTimeline_ms() - motor_start;
@@ -102,6 +113,24 @@ __attribute__((noreturn)) void StartDAEMONTASK(void const *argument)
         daemon_dt = DWT_GetTimeline_ms() - daemon_start;
         if (daemon_dt > 10)
             LOGERROR("[freeRTOS] Daemon Task is being DELAY! dt = [%f]", &daemon_dt);
+
+        // 看门狗: 三个控制任务在上一个 10ms 周期内都有推进才喂狗。
+        // 任一任务卡死 -> 停止喂狗 -> 约 1s 后 IWDG 复位(reload 见 bsp_iwdg.h)。
+        if (iwdg_alive_ins && iwdg_alive_motor && iwdg_alive_robot)
+        {
+            BSPIWDGFeed();
+        }
+        else
+        {
+            static uint8_t stall_log_cnt = 0; // 限频打印, 避免刷屏把 RTT 堵死
+            if ((stall_log_cnt++ % 20u) == 0u)
+                LOGERROR("[iwdg] task stall! ins=%d motor=%d robot=%d -> NOT feeding (reset in ~1s)",
+                         (int)iwdg_alive_ins, (int)iwdg_alive_motor, (int)iwdg_alive_robot);
+        }
+        iwdg_alive_ins = 0;
+        iwdg_alive_motor = 0;
+        iwdg_alive_robot = 0;
+
         osDelay(10);
     }
 }
@@ -114,6 +143,7 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument)
     // 200Hz-500Hz,若有额外的控制任务如平衡步兵可能需要提升至1kHz
     for (;;)
     {
+        iwdg_alive_robot = 1; // 心跳
         robot_start = DWT_GetTimeline_ms();
         RobotTask();
         robot_dt = DWT_GetTimeline_ms() - robot_start;

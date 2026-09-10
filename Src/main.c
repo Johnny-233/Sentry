@@ -37,6 +37,7 @@
 /* USER CODE BEGIN Includes */
 #include "robot.h"
 #include "bsp_log.h"
+#include "bsp_iwdg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -122,6 +123,12 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	RobotInit(); // 唯一的初始化函数
   LOGINFO("[main] SystemInit() and RobotInit() done");
+
+  // 看门狗: 放在 RobotInit 之后、调度器启动之前。
+  // 初始化阶段(IMU 校准等)最坏可能超过超时时间, 所以不在初始化期间挂狗, 避免正常启动被复位;
+  // 运行期由 daemon 任务按三个控制任务的心跳喂狗(见 application/robot_task.h)。
+  BSPIWDGLogResetCause();              // 先把上次复位原因打出来, 再清标志
+  BSPIWDGInit(BSP_IWDG_RELOAD_1S);
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in freertos.c) */
