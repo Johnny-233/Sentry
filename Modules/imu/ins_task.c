@@ -19,6 +19,10 @@
 #include "user_lib.h"
 #include "general_def.h"
 #include "master_process.h"
+#include <math.h>
+
+/* BMI088 初始化最大重试次数: 原实现是无上限 while 空转, 且当时位于 RobotInit 的关中断窗口, IMU 异常会静默卡死启动 */
+#define INS_IMU_INIT_MAX_RETRY 3
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -67,14 +71,42 @@ static void InitQuaternion(float *init_q4)
     }
     for (uint8_t i = 0; i < 3; ++i)
         acc_init[i] /= 100;
+
+    // 读数有效性检查: IMU 未就绪或读数全零时, 原实现会在 Norm3d 里做 0/0 -> NaN,
+    // 并把 NaN 灌进 EKF 初值导致姿态永久 NaN。此处退化为单位四元数(水平)。
+    float acc_norm = sqrtf(acc_init[0] * acc_init[0] + acc_init[1] * acc_init[1] + acc_init[2] * acc_init[2]);
+    if (!(acc_norm > 1e-3f) || !isfinite(acc_norm))
+    {
+        LOGERROR("[ins] invalid accel (norm = %f), use identity quaternion", acc_norm);
+        init_q4[0] = 1.0f;
+        init_q4[1] = 0.0f;
+        init_q4[2] = 0.0f;
+        init_q4[3] = 0.0f;
+        return;
+    }
+
     Norm3d(acc_init);
-    // 计算原始加速度矢量和导航系重力加速度矢量的夹角
-    float angle = acosf(Dot3d(acc_init, gravity_norm));
+    // 计算原始加速度矢量和导航系重力加速度矢量的夹角(夹取到[-1,1]防浮点误差让 acosf 返回 NaN)
+    float dot = fmaxf(-1.0f, fminf(Dot3d(acc_init, gravity_norm), 1.0f));
+    float angle = acosf(dot);
     Cross3d(acc_init, gravity_norm, axis_rot);
+
+    // 加速度与重力平行(车体已水平)时叉乘为零向量, 此时单位四元数就是正确解
+    float axis_norm = sqrtf(axis_rot[0] * axis_rot[0] + axis_rot[1] * axis_rot[1] + axis_rot[2] * axis_rot[2]);
+    if (!(axis_norm > 1e-6f) || !isfinite(axis_norm))
+    {
+        init_q4[0] = 1.0f;
+        init_q4[1] = 0.0f;
+        init_q4[2] = 0.0f;
+        init_q4[3] = 0.0f;
+        return;
+    }
+
     Norm3d(axis_rot);
     init_q4[0] = cosf(angle / 2.0f);
     for (uint8_t i = 0; i < 2; ++i)
         init_q4[i + 1] = axis_rot[i] * sinf(angle / 2.0f); // 轴角公式,第三轴为0(没有z轴分量)
+    init_q4[3] = 0.0f;
 }
 
 attitude_t *INS_Init(void)
@@ -86,8 +118,18 @@ attitude_t *INS_Init(void)
 
     HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
 
-    while (BMI088Init(&hspi1, 1) != BMI088_NO_ERROR)
-        ;
+    // 有上限重试: 失败也要继续往下走(姿态保持初始水平), 绝不在关中断窗口里死等
+    uint8_t imu_err = BMI088_NO_ERROR;
+    for (uint8_t retry = 0; retry < INS_IMU_INIT_MAX_RETRY; ++retry)
+    {
+        imu_err = BMI088Init(&hspi1, 1);
+        if (imu_err == BMI088_NO_ERROR)
+            break;
+        LOGERROR("[ins] BMI088 init failed (err 0x%02X), retry %d/%d", (unsigned)imu_err, (int)retry + 1, (int)INS_IMU_INIT_MAX_RETRY);
+        DWT_Delay(0.01);
+    }
+    if (imu_err != BMI088_NO_ERROR)
+        LOGERROR("[ins] BMI088 UNAVAILABLE (err 0x%02X): attitude stays at initial level, check SPI/wiring", (unsigned)imu_err);
     IMU_Param.scale[X] = 1;
     IMU_Param.scale[Y] = 1;
     IMU_Param.scale[Z] = 1;

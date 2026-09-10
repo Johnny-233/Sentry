@@ -166,6 +166,8 @@ int float_rounding(float raw)
 float *Norm3d(float *v)
 {
     float len = Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(len > 1e-6f)) // 零向量/异常模长保护: 直接返回, 避免 0/0 得到 NaN 并污染后续解算
+        return v;
     v[0] /= len;
     v[1] /= len;
     v[2] /= len;

@@ -20,6 +20,9 @@ int16_t caliCount = 0;
 
 IMU_Data_t BMI088;
 
+/* 单个寄存器"写后回读"允许的最大重试次数(原实现用 write_reg_num-- 重试, 在索引0时会下溢成255 -> 越界读表 + 死循环) */
+#define BMI088_INIT_REG_RETRY_MAX 3
+
 #if defined(BMI088_USE_SPI)
 
 #define BMI088_accel_write_single_reg(reg, data) \
@@ -239,6 +242,7 @@ void Calibrate_MPU_Offset(IMU_Data_t *bmi088)
 
 uint8_t bmi088_accel_init(void)
 {
+    uint8_t err = BMI088_NO_ERROR;
     // check commiunication
     BMI088_accel_read_single_reg(BMI088_ACC_CHIP_ID, res);
     DWT_Delay(0.001);
@@ -273,16 +277,16 @@ uint8_t bmi088_accel_init(void)
 
         if (res != BMI088_Accel_Init_Table[write_reg_num][1])
         {
-            // write_reg_num--;
-            // return BMI088_Accel_Init_Table[write_reg_num][2];
-            error |= BMI088_Accel_Init_Table[write_reg_num][2];
+            err |= BMI088_Accel_Init_Table[write_reg_num][2];
+            LOGERROR("[bmi088] accel reg [0x%02X] verify failed", (unsigned)BMI088_Accel_Init_Table[write_reg_num][0]);
         }
     }
-    return BMI088_NO_ERROR;
+    return err; // 原来恒返回 NO_ERROR, 会把真实故障吞掉
 }
 
 uint8_t bmi088_gyro_init(void)
 {
+    uint8_t err = BMI088_NO_ERROR;
     // check commiunication
     BMI088_gyro_read_single_reg(BMI088_GYRO_CHIP_ID, res);
     DWT_Delay(0.001);
@@ -309,22 +313,32 @@ uint8_t bmi088_gyro_init(void)
     // set gyro sonsor config and check
     for (write_reg_num = 0; write_reg_num < BMI088_WRITE_GYRO_REG_NUM; write_reg_num++)
     {
+        uint8_t retry = 0;
 
-        BMI088_gyro_write_single_reg(BMI088_Gyro_Init_Table[write_reg_num][0], BMI088_Gyro_Init_Table[write_reg_num][1]);
-        DWT_Delay(0.001);
-
-        BMI088_gyro_read_single_reg(BMI088_Gyro_Init_Table[write_reg_num][0], res);
-        DWT_Delay(0.001);
-
-        if (res != BMI088_Gyro_Init_Table[write_reg_num][1])
+        for (;;)
         {
-            write_reg_num--;
-            // return BMI088_Gyro_Init_Table[write_reg_num][2];
-            error |= BMI088_Accel_Init_Table[write_reg_num][2];
+            BMI088_gyro_write_single_reg(BMI088_Gyro_Init_Table[write_reg_num][0], BMI088_Gyro_Init_Table[write_reg_num][1]);
+            DWT_Delay(0.001);
+
+            BMI088_gyro_read_single_reg(BMI088_Gyro_Init_Table[write_reg_num][0], res);
+            DWT_Delay(0.001);
+
+            if (res == BMI088_Gyro_Init_Table[write_reg_num][1])
+                break; // 写入校验通过
+
+            if (++retry >= BMI088_INIT_REG_RETRY_MAX)
+            {
+                // 重试仍不匹配: 记录该寄存器的陀螺错误码后继续配置下一个寄存器
+                // (绝不修改 write_reg_num, 避免原实现在索引0处下溢成255导致越界读表与死循环)
+                err |= BMI088_Gyro_Init_Table[write_reg_num][2];
+                LOGERROR("[bmi088] gyro reg [0x%02X] verify failed after %d retries",
+                         (unsigned)BMI088_Gyro_Init_Table[write_reg_num][0], (int)retry);
+                break;
+            }
         }
     }
 
-    return BMI088_NO_ERROR;
+    return err; // 原来恒返回 NO_ERROR, 会把真实故障吞掉
 }
 
 void BMI088_Read(IMU_Data_t *bmi088)
