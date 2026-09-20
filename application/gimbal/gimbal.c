@@ -6,6 +6,7 @@
 #include "general_def.h"
 #include "mi_motor.h"
 #include "bmi088.h"
+#include "bsp_log.h"
 
 static attitude_t *gimbal_IMU_data; // 云台IMU数据
 static DJIMotorInstance *yaw_motor;
@@ -87,7 +88,24 @@ void GimbalInit()
     yaw_motor = DJIMotorInit(&yaw_config);
     pitch_motor = MIMotorInit(&pitch_config);
     MIMotorEnable(pitch_motor);
-    MIMotorInstanceetMechPositionToZero(pitch_motor);
+
+    /* ---- pitch 机械零位策略 ----
+     * MI 电机的机械零位(通信类型6)"掉电丢失"(见 mi_motor.c:202), 所以必须在合适的时候重设。
+     * 但"每次 MCU 上电都重设"是错的: 烧录/看门狗/引脚复位只复位 MCU, 电机一直带电、并保持上一次的位置,
+     * 此时把当前姿态设成 0, 行程区间就会随复位瞬间的姿态整体漂移 —— 表现就是"抬到某个角度并把那里当下限位,
+     * 遥控器再也打不到另一侧"。
+     * 正确做法: 只有"整机断电后重新上电"(POR)才重设零位; 其余复位保持电机原有零位(此时它依然有效)。
+     * 因此: 换电池后请先把云台摆到参考姿态(一般让它靠重力落到机械下限)再上电; 烧录/复位则完全不影响行程。
+     * 注: 本函数在 BSPIWDGLogResetCause() 清复位标志之前执行, 这里读到的是真实的上次复位原因。 */
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET)
+    {
+        MIMotorInstanceetMechPositionToZero(pitch_motor);
+        LOGINFO("[gimbal] POR reset detected: MI pitch mechanical zero re-established");
+    }
+    else
+    {
+        LOGINFO("[gimbal] non-POR reset (flash/soft/wdg/pin): keep MI pitch mechanical zero");
+    }
 
     
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
