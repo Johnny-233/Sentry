@@ -721,7 +721,9 @@ typedef struct
     float pitch_cmd;    // gimbal_cmd_send.pitch (rad, 现有代码按电机坐标系使用)
     float pitch_motor;  // MI 电机角度 measure.angle (rad)
     float pitch_imu;    // IMU pitch (rad, 重力参考)
-    float pad_;         // 对齐
+    float yaw_motor_speed; // yaw 电机转速 measure.speed_aps (deg/s, 云台相对底盘的角速度)
+    float yaw_motor_angle; // yaw 电机总角度 measure.total_angle (deg, 云台相对底盘)
+    float pad_;            // 对齐
 } vt_sample_t;
 
 static vt_sample_t vt_buf[VT_LEN];
@@ -754,6 +756,8 @@ static void VisionTraceSample(void)
     s->pitch_cmd = gimbal_cmd_send.pitch;
     s->pitch_motor = (pm != NULL) ? pm->measure.angle : 0.0f;
     s->pitch_imu = gimbal_fetch_data.gimbal_imu_data.Pitch * DEGREE_2_RAD;
+    s->yaw_motor_speed = ym->measure.speed_aps;
+    s->yaw_motor_angle = ym->measure.total_angle;
     g_vt_head++;
 
     if (vt_post_cnt == 0 && fabsf(s->vis_err) > 5.0f && g_vt_head > 64)
