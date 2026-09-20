@@ -717,18 +717,30 @@ typedef struct
     float ang_out;      // yaw 角度环输出(= 速度环参考)
     int16_t cur_out;    // yaw 速度环输出(= 电流指令, 饱和就看它)
     uint16_t can_fire;
+    /* --- pitch 标定用: 测出 电机坐标系 <-> IMU/重力坐标系 的方向与偏置 --- */
+    float pitch_cmd;    // gimbal_cmd_send.pitch (rad, 现有代码按电机坐标系使用)
+    float pitch_motor;  // MI 电机角度 measure.angle (rad)
+    float pitch_imu;    // IMU pitch (rad, 重力参考)
+    float pad_;         // 对齐
 } vt_sample_t;
 
 static vt_sample_t vt_buf[VT_LEN];
 volatile uint32_t g_vt_head = 0;   // 已写入样本数(环形)
-volatile uint8_t g_vt_frozen = 0;  // 1 = 已冻结, 可以 dump
+volatile uint8_t g_vt_frozen = 0;     // 1 = 已冻结, 可以 dump
+volatile uint8_t g_vt_freeze_req = 0; // 调试用: 由 OpenOCD 写 1 即冻结, 保留最近 256 拍
 static uint32_t vt_post_cnt = 0;
 
 static void VisionTraceSample(void)
 {
     if (g_vt_frozen)
         return;
+    if (g_vt_freeze_req) // 手动冻结(OpenOCD 写 g_vt_freeze_req=1)
+    {
+        g_vt_frozen = 1;
+        return;
+    }
 
+    MIMotorInstance *pm = GetPitchMotor();
     DJIMotorInstance *ym = GetYawMotor();
     vt_sample_t *s = &vt_buf[g_vt_head % VT_LEN];
     s->frame_cnt = g_vision_frame_cnt;
@@ -739,6 +751,9 @@ static void VisionTraceSample(void)
     s->ang_out = ym->motor_controller.angle_PID.Output;
     s->cur_out = (int16_t)ym->motor_controller.speed_PID.Output;
     s->can_fire = (uint16_t)minipc_recv_data->Vision.can_fire;
+    s->pitch_cmd = gimbal_cmd_send.pitch;
+    s->pitch_motor = (pm != NULL) ? pm->measure.angle : 0.0f;
+    s->pitch_imu = gimbal_fetch_data.gimbal_imu_data.Pitch * DEGREE_2_RAD;
     g_vt_head++;
 
     if (vt_post_cnt == 0 && fabsf(s->vis_err) > 5.0f && g_vt_head > 64)
