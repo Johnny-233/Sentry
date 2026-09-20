@@ -223,21 +223,21 @@ void FoundEnermy()
             float err_delta = raw_err - err_last;
             float alpha;
 
-            // 误差估计的滤波强度(τ = 5ms/alpha): 原值 0.3/0.2/0.1 对应 τ≈17/25/50ms, 对动目标太慢
+            // 误差估计的滤波强度(τ = 5ms/alpha)。
+            // 注意: 0.0012 增益 + 0.7/0.5/0.4 的组合会在实车上引起 pitch 震荡(相位裕度不足),
+            // 已回退到原值。要提高跟踪速度必须同时加大阻尼(MI 电机 kd), 见 CODE_REVIEW.md 调参记录。
             if (fabsf(err_delta) > 0.5f)
-                alpha = 0.7f;    // 大跳变: 快速跟上(τ≈7ms)
+                alpha = 0.3f;    // 大跳变: 快速跟上
             else if (fabsf(err_delta) > 0.05f)
-                alpha = 0.5f;    // 跟踪中(τ≈10ms)
+                alpha = 0.2f;    // 跟踪中: 中等响应
             else
-                alpha = 0.4f;    // 微调: 仍保留一定平滑(τ≈12.5ms)
+                alpha = 0.1f;    // 微调: 强滤波抑制噪声
 
             err_filtered = alpha * raw_err + (1.0f - alpha) * err_filtered;
             err_last = raw_err;
 
-            // 增量式控制: 增益即"每 5ms 每度误差转多少弧度"。
-            // 匀速动目标下的跟随误差 e_ss ∝ 目标角速度/增益, 所以这个值直接决定跟不上多少:
-            // 0.0005 -> 约 5.7°/s 每度误差(30°/s 的目标约滞后 5°); 加到 0.0012 后同样条件下约 2°
-            gimbal_cmd_send.pitch += 0.0012f * err_filtered;
+            // 增量式控制, 增益可安全设高
+            gimbal_cmd_send.pitch += 0.0005f * err_filtered;
         }
         else
         {
