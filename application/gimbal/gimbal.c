@@ -116,6 +116,99 @@ void GimbalInit()
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
 }
 
+/* ==================== pitch 上电回零 (homing) ====================
+ * 为什么必须做: 实测 MI 电机每次上电后上报角度的绝对基准都会变(数值不一致),
+ * 因此"固定绝对限位"不可行(上次的测试固件没使能电机, 所以没暴露这个问题)。
+ * 做法: 首次进入云台模式时, 用一个缓慢推进的位置目标往下"找"机械下限:
+ *       - 每周期只推进 HOMING_STEP_RAD(200Hz => 0.2 rad/s), 顶到限位时位置误差会缓慢累积;
+ *       - 位置误差连续超阈值 => 判定已到下限;
+ *       - 在那里发送"设置机械零位"(通信类型6), 之后所有软限位都相对这个零点, 每次上电都一致;
+ *       - 设零后必须静默几拍(只发零位命令, 不再发位置命令), 否则会被下一个位置命令覆盖 ——
+ *         MI 电机发送用的是同一个静态缓冲(见 CODE_REVIEW 的 N6)。
+ * 安全: 回零用很小的 kp(推力小) + 限时(超时则放弃回零并报错, 不用未标定的限位驱动机构)。
+ * ⚠️ 上机首次验证: 观察回零时炮管是否朝"下"移动; 若朝上走, 把 PITCH_HOMING_DIR 改成 -1.0f。 */
+#define PITCH_HOMING_ENABLE 1
+#define PITCH_HOMING_DIR (+1.0f)   /* +1 = 目标递增方向为"下"(与实测一致: 下垂位读数更大) */
+#define HOMING_STEP_RAD 0.001f     /* 每拍推进量 */
+#define HOMING_STALL_ERR 0.10f     /* 位置误差超过此值视为顶住 */
+#define HOMING_STALL_CNT 40        /* 连续 40 拍(0.2s)确认 */
+#define HOMING_MAX_RAD 1.20f       /* 最多推进这么多(略大于全行程 0.91rad) */
+#define HOMING_SILENCE_CNT 10      /* 设零后静默拍数, 保证零位命令真的发出去 */
+#define HOMING_KP 3.0f             /* 回零期间的位置环 kp(小 => 顶住时推力小) */
+#define HOMING_KD 0.5f
+
+static uint8_t pitch_homed = 0;    /* 1 = 本次上电已完成回零 */
+
+/* 返回 1 表示已完成回零(调用方可以正常控制 pitch), 0 表示仍在回零/回零失败 */
+static uint8_t PitchHomingTask(void)
+{
+    static uint8_t state = 0; /* 0=开始 1=找下限 2=静默发零位 3=完成 4=失败 */
+    static float start_angle, target;
+    static uint16_t stall_cnt, total_cnt, silence_cnt;
+
+    if (state == 3)
+    {
+        pitch_homed = 1;
+        return 1;
+    }
+    if (state == 4)
+        return 0;
+
+    float angle = pitch_motor->measure.angle;
+
+    if (state == 0)
+    {
+        MIMotorEnable(pitch_motor);
+        start_angle = angle;
+        target = angle;
+        stall_cnt = 0;
+        total_cnt = 0;
+        state = 1;
+        LOGINFO("[gimbal] pitch homing start at %.4f rad", angle);
+    }
+
+    if (state == 1)
+    {
+        target += PITCH_HOMING_DIR * HOMING_STEP_RAD;
+        total_cnt++;
+        MI_motor_LocationControl(pitch_motor, target, HOMING_KP, HOMING_KD);
+
+        if (fabsf(angle - target) > HOMING_STALL_ERR)
+            stall_cnt++;
+        else
+            stall_cnt = 0;
+
+        if (stall_cnt > HOMING_STALL_CNT)
+        {
+            MIMotorInstanceetMechPositionToZero(pitch_motor); /* 在当前位置(机械下限)设零 */
+            LOGINFO("[gimbal] pitch homing: lower limit found at %.4f rad, zero set", angle);
+            silence_cnt = 0;
+            state = 2;
+        }
+        else if (total_cnt > 4000 || fabsf(target - start_angle) > HOMING_MAX_RAD)
+        {
+            LOGERROR("[gimbal] pitch homing FAILED (no stall within %.2f rad) -> pitch disabled, check PITCH_HOMING_DIR",
+                     (double)HOMING_MAX_RAD);
+            MIMotorInstancestop(pitch_motor);
+            state = 4;
+        }
+        return 0;
+    }
+
+    /* state == 2: 静默几拍, 保证"设置机械零位"真的发出去(发送缓冲是共享的) */
+    silence_cnt++;
+    if (silence_cnt >= HOMING_SILENCE_CNT)
+    {
+        MIMotorEnable(pitch_motor);
+        gimbal_cmd_recv.pitch = pitch_motor->measure.angle; /* 以回零后的位置作为指令起点 */
+        LOGINFO("[gimbal] pitch homing done, angle now %.4f rad", pitch_motor->measure.angle);
+        state = 3;
+        pitch_homed = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static void GimbalStateSet()
 {
     switch (gimbal_cmd_recv.gimbal_mode)
@@ -132,7 +225,14 @@ static void GimbalStateSet()
 #if PITCH_BRINGUP_TEST
         MIMotorInstancestop(pitch_motor); // 测试: 保持自由, 绝不用未标定的限位去驱动机构
 #else
-        MI_motor_LocationControl(pitch_motor,gimbal_cmd_recv.pitch,pitch_motor->motor_controller.angle_PID.Kp,pitch_motor->motor_controller.angle_PID.Kd);
+#if PITCH_HOMING_ENABLE
+        if (PitchHomingTask()) // 回零完成前不执行正常位置控制(期间只做"缓慢找下限")
+#endif
+        {
+            MI_motor_LocationControl(pitch_motor, gimbal_cmd_recv.pitch,
+                                     pitch_motor->motor_controller.angle_PID.Kp,
+                                     pitch_motor->motor_controller.angle_PID.Kd);
+        }
 #endif
         if(motor_init==0)
         {
