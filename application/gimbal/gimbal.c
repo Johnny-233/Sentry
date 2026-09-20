@@ -29,11 +29,14 @@ void GimbalInit()
         .controller_param_init_config = {
             .angle_PID = {
                 .Kp = 40, // 30->40 增强跟踪响应
-                .Ki = 20,
+                // Ki 是"消除匀速目标跟随误差"的那一项: 20 时每拍只加 20*e*dt, 把跟踪所需偏置补齐约需 1.7~2s
+                // (实测现象就是"慢一点才跟上"); 提到 60 后约 0.6s 补足。
+                .Ki = 60,
                 .Kd = 6,// 3->6 增加阻尼抑制震荡
                 .DeadBand = 0.1,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 100,
+                // 给积分足够的偏置权限: 该输出经速度环(×约50)后相当于电流偏置, 250 -> 约 12500 计数
+                .IntegralLimit = 250,
                 .CoefA = 7,
                 .CoefB = 7,
                 .MaxOut = 330,
@@ -47,7 +50,8 @@ void GimbalInit()
                 .Ki = 60,  // 150 -> 60, 抑制锁定微振
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 3000,
+                // 稳态匀速跟随时需要积分提供偏置电流, 原 3000 偏紧
+                .IntegralLimit = 6000,
                 .MaxOut = 20000,
                 // 加速度前馈: Output += FF_Gain * d(gyro)/dt。原值 500 修好后会生效,
                 // 但陀螺噪声会被放大成电流抖动, 先置 0; 想进一步加快响应再逐步加(50~150)。
