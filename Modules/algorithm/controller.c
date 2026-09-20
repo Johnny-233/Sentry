@@ -127,13 +127,24 @@ static void f_PID_ErrorHandle(PIDInstance *pid)
  */
 void PIDInit(PIDInstance *pid, PID_Init_Config_s *config)
 {
-    // config的数据和pid的部分数据是连续且相同的的,所以可以直接用memcpy
-    // @todo: 不建议这样做,可扩展性差,不知道的开发者可能会误以为pid和config是同一个结构体
-    // 后续修改为逐个赋值
+    // 逐字段赋值。
+    // 原实现是 memcpy(pid, config, sizeof(PID_Init_Config_s)): 它依赖两个结构体前部布局完全一致,
+    // 但 PIDInstance 在 Improve 之后紧接着是 Measure, 而配置结构体在 Improve 之后还有
+    // IntegralLimit/CoefA/CoefB/两个 RC 和 FF_Gain(偏移44) -> config.FF_Gain 被写进了 pid->Measure,
+    // 真正的 pid->FF_Gain(偏移96) 永远保持 memset 后的 0, 前馈静默失效。
     memset(pid, 0, sizeof(PIDInstance));
-    // utilize the quality of struct that its memeory is continuous
-    memcpy(pid, config, sizeof(PID_Init_Config_s));
-    // set rest of memory to 0
+    pid->Kp = config->Kp;
+    pid->Ki = config->Ki;
+    pid->Kd = config->Kd;
+    pid->MaxOut = config->MaxOut;
+    pid->DeadBand = config->DeadBand;
+    pid->Improve = config->Improve;
+    pid->IntegralLimit = config->IntegralLimit;
+    pid->CoefA = config->CoefA;
+    pid->CoefB = config->CoefB;
+    pid->Output_LPF_RC = config->Output_LPF_RC;
+    pid->Derivative_LPF_RC = config->Derivative_LPF_RC;
+    pid->FF_Gain = config->FF_Gain;
     DWT_GetDeltaT(&pid->DWT_CNT);
 }
 

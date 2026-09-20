@@ -51,8 +51,10 @@ static float Cal_FollowControl_Internal(GimbalAlgorithm_t *gimbal, attitude_t gi
     // 自适应滤波参数选择 —— Pitch/Yaw 使用不同的阈值和系数
     gimbal->filter_factor = DEFAULT_FILTER_FACTOR;
 
-    float step_threshold   = is_pitch ? PITCH_STEP_THRESHOLD   : 10.0f;
-    float fast_threshold   = is_pitch ? PITCH_FAST_THRESHOLD   : 0.8f;
+    // 每拍(5ms)指令变化量门限: 目标角速度 = 门限/5ms。
+    // 原值 10/0.8 意味着目标角速度 <160°/s 时全落进最慢档(τ≈500ms); 现在 4/0.2 对应 <40°/s 用慢档, >40°/s 即进入快档
+    float step_threshold   = is_pitch ? PITCH_STEP_THRESHOLD   : 4.0f;
+    float fast_threshold   = is_pitch ? PITCH_FAST_THRESHOLD   : 0.2f;
     float step_filter      = is_pitch ? PITCH_STEP_FILTER_FACTOR    : STEP_FILTER_FACTOR;
     float corner_filter    = is_pitch ? PITCH_CORNER_FILTER_FACTOR  : CORNER_FILTER_FACTOR;
     float fast_filter      = is_pitch ? PITCH_FAST_FILTER_FACTOR    : FAST_FILTER_FACTOR;

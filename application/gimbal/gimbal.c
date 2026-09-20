@@ -36,7 +36,10 @@ void GimbalInit()
                 .CoefA = 7,
                 .CoefB = 7,
                 .MaxOut = 330,
-                .FF_Gain = 350.0,  
+                // 速度前馈(对角度环而言): Output += FF_Gain * d(角度)/dt。
+                // 修复 PIDInit 之前这个值一直是 0(前馈静默失效) —— 这正是"动目标跟不上(存在跟随误差)"的主因之一。
+                // 原来填写的是 350, 先在 120 起步(修好后 350 可能过冲/振荡), 稳定后可逐步加到 200~350。
+                .FF_Gain = 120.0,
             },
             .speed_PID = {
                 .Kp = 50,  // 50
@@ -45,7 +48,9 @@ void GimbalInit()
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3000,
                 .MaxOut = 20000,
-                .FF_Gain = 500.0,
+                // 加速度前馈: Output += FF_Gain * d(gyro)/dt。原值 500 修好后会生效,
+                // 但陀螺噪声会被放大成电流抖动, 先置 0; 想进一步加快响应再逐步加(50~150)。
+                .FF_Gain = 0.0,
             },
             .other_angle_feedback_ptr = &gimbal_IMU_data->YawTotalAngle,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明

@@ -34,11 +34,13 @@ float Cal_FollowControl_Set_Pitch(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s 
 float Cal_FollowControl_Feedforward(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv);
 
 // === Yaw 滤波系数 ===
-#define DEFAULT_FILTER_FACTOR 0.9f  // 默认
-#define STEP_FILTER_FACTOR 0.4f      // 阶跃
+/* 一阶低通时间常数 τ = 更新周期/(1-filter): RobotTask=200Hz(5ms) 时
+ * 0.99 -> τ≈500ms(动目标会明显滞后, 这就是"跟不上"的主因之一), 0.7 -> τ≈17ms, 0.5 -> τ≈10ms */
+#define DEFAULT_FILTER_FACTOR 0.6f  // 默认(τ≈12.5ms)
+#define STEP_FILTER_FACTOR 0.4f      // 阶跃(τ≈8ms)
 #define CORNER_FILTER_FACTOR 0.6f    // 三角形拐点
 #define FAST_FILTER_FACTOR 0.6f     // 快速连续变化
-#define SLOW_FILTER_FACTOR 0.99f      // 静止，强滤波抑制视觉噪声
+#define SLOW_FILTER_FACTOR 0.7f      // 静止/慢速: 0.99 会带来约 0.5s 滞后, 降到 0.7 兼顾噪声与响应
 
 // === Yaw 前馈系数 ===
 #define DEFAULT_FEEDFORWARD_FACTOR 2.0f  // 默认
