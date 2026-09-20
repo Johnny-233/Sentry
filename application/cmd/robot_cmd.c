@@ -178,6 +178,18 @@ static void VisionJudge()
 static void BasicSet()
 {
     CalcOffsetAngle();
+
+    /* 首次进入时用"当前实际姿态"作为 pitch 指令初值:
+     * 原来初值是 0, 而软限位区间(如 [-1.85,-1.05] rad)不包含 0, 于是上电第一次限位就把指令夹到某一端,
+     * 云台会立刻转到那个角度(并且看起来"把那个角度当成了下限位")。
+     * 现在从当前姿态起步, 上电不再跳动, 遥控器可在整个限位区间内活动。 */
+    static uint8_t pitch_cmd_inited = 0;
+    if (!pitch_cmd_inited && gimbal_fetch_data.gimbal_imu_data.Pitch != 0.0f)
+    {
+        gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch * DEGREE_2_RAD;
+        pitch_cmd_inited = 1;
+    }
+
     GimbalPitchLimit();
     VisionJudge();
     //发射基本模式设定
@@ -445,7 +457,9 @@ static void Sentry_GimbalAC()
         {
             // 平滑进入: 从当前实际角度按每周期限步长逼近PIT, 避免停机恢复时硬跳/撞限位
             const float entry_step = 0.02f; // rad/周期(200Hz下约4rad/s), 略大于摆扫速率使其能追上
-            float cur = PP_Motor->measure.angle;
+            // 注意: PIT 是 IMU/重力坐标系的角度, 原来拿电机角度(measure.angle, 零点在上电姿态)与之相减,
+            // 两者不同坐标系。改用 IMU pitch 换算成 rad, 保证同坐标系比较。
+            float cur = gimbal_fetch_data.gimbal_imu_data.Pitch * DEGREE_2_RAD;
             float err = PIT - cur;
             if (fabsf(err) <= entry_step)
             {
@@ -652,7 +666,9 @@ static void AnythingStop()
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.loader_mode = LOAD_STOP;
-    gimbal_cmd_send.pitch = 0.0;
+    // 停止时把 pitch 指令设为"当前实际姿态"(IMU/重力坐标系), 而不是 0:
+    // 否则重新进入云台模式时, 指令会被软限位夹到某一端, 云台突然转过去(就是"把某个角度当下限位"的现象之一)。
+    gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch * DEGREE_2_RAD;
     DataLebel.ACEntryPoint = 1;
     //重置与小电脑通信失败的标志位
     DataLebel.cmd_error_flag=0;

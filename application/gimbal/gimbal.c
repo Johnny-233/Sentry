@@ -16,6 +16,17 @@ static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
 static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 static uint8_t motor_init=0;
+
+/* ---------------- pitch 坐标系映射 ----------------
+ * MI 电机的机械零位每次上电都会被重设(见 mi_motor.c:202 "通信类型6 ... 掉电丢失"),
+ * 也就是说"电机角度坐标系"的 0 点是"上电瞬间的姿态"; 而 PITCH_MIN/MAX_ANGLE 是相对重力的
+ * 绝对角度(robot_def.h 注释也写明"注意反馈如果是陀螺仪,则填写陀螺仪的角度")。
+ * 两者直接混用会导致: 上电后软限位把指令夹到某个极限, 云台先转过去, 之后遥控器再也打不到另一侧
+ * (表现为"开机抬高到某个角度, 并把它当成下限位")。
+ * 解决: 上电首次使能时记录一次偏置, 之后把 IMU 坐标系的指令映射到电机坐标系。 */
+#define PITCH_IMU_TO_MOTOR_SIGN (+1.0f) /* 若上电后 pitch 朝反方向冲/顶死, 改成 -1.0f */
+static float pitch_frame_offset_rad = 0.0f; /* 电机角度 = SIGN * IMU_pitch(rad) + offset */
+
 void GimbalInit()
 {
     gimbal_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
@@ -107,7 +118,6 @@ static void GimbalStateSet()
     case GIMBAL_GYRO_MODE:
         DJIMotorEnable(yaw_motor);
         DJIMotorSetRef(yaw_motor,gimbal_cmd_recv.yaw);
-        MI_motor_LocationControl(pitch_motor,gimbal_cmd_recv.pitch,pitch_motor->motor_controller.angle_PID.Kp,pitch_motor->motor_controller.angle_PID.Kd);
         if(motor_init==0)
         {
             MIMotorEnable(pitch_motor);
@@ -119,8 +129,16 @@ static void GimbalStateSet()
             // 以当前角度初始化pid_ref,避免阶跃
             yaw_motor->motor_controller.pid_ref = gimbal_IMU_data->YawTotalAngle;
             gimbal_feedback_data.init_location = gimbal_IMU_data->Pitch;
+            // 记录 pitch 坐标系偏置: 使能瞬间电机角度 与 IMU pitch(重力参考) 的差
+            pitch_frame_offset_rad = pitch_motor->measure.angle -
+                                     PITCH_IMU_TO_MOTOR_SIGN * (gimbal_IMU_data->Pitch * DEGREE_2_RAD);
             motor_init=1;
         }
+        // 把 IMU/重力坐标系的 pitch 指令映射到电机坐标系(上电姿态不再影响软限位的含义)
+        MI_motor_LocationControl(pitch_motor,
+                                 PITCH_IMU_TO_MOTOR_SIGN * gimbal_cmd_recv.pitch + pitch_frame_offset_rad,
+                                 pitch_motor->motor_controller.angle_PID.Kp,
+                                 pitch_motor->motor_controller.angle_PID.Kd);
         break;
     default:
         break;
