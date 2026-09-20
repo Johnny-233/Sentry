@@ -17,6 +17,12 @@ static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
 static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 static uint8_t motor_init=0;
+
+/* ---- pitch 上电标定/测量开关 ----
+ * 1 = 测试固件: 不设机械零位、不使能也不控制 pitch 电机(保持自由停止),
+ *     仅用于通过黑匣子读取 MI 电机上报角度, 验证"机械零位掉电后回到的基准是否固定"。
+ * 0 = 正常工作固件。测完必须改回 0！ */
+#define PITCH_BRINGUP_TEST 1
 void GimbalInit()
 {
     gimbal_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
@@ -93,6 +99,9 @@ void GimbalInit()
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
     yaw_motor = DJIMotorInit(&yaw_config);
     pitch_motor = MIMotorInit(&pitch_config);
+#if PITCH_BRINGUP_TEST
+    MIMotorInstancestop(pitch_motor); // 测试: 自由状态(可被重力/手移动), 仅读取上报角度
+#else
     MIMotorEnable(pitch_motor);
 
     /* ---- pitch 机械零位策略 ----
@@ -112,6 +121,7 @@ void GimbalInit()
     {
         LOGINFO("[gimbal] non-POR reset (flash/soft/wdg/pin): keep MI pitch mechanical zero");
     }
+#endif
 
     
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
@@ -131,7 +141,11 @@ static void GimbalStateSet()
     case GIMBAL_GYRO_MODE:
         DJIMotorEnable(yaw_motor);
         DJIMotorSetRef(yaw_motor,gimbal_cmd_recv.yaw);
+#if PITCH_BRINGUP_TEST
+        MIMotorInstancestop(pitch_motor); // 测试: 保持自由, 绝不用未标定的限位去驱动机构
+#else
         MI_motor_LocationControl(pitch_motor,gimbal_cmd_recv.pitch,pitch_motor->motor_controller.angle_PID.Kp,pitch_motor->motor_controller.angle_PID.Kd);
+#endif
         if(motor_init==0)
         {
             MIMotorEnable(pitch_motor);
