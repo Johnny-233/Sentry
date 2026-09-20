@@ -22,7 +22,7 @@ static uint8_t motor_init=0;
  * 1 = 测试固件: 不设机械零位、不使能也不控制 pitch 电机(保持自由停止),
  *     仅用于通过黑匣子读取 MI 电机上报角度, 验证"机械零位掉电后回到的基准是否固定"。
  * 0 = 正常工作固件。测完必须改回 0！ */
-#define PITCH_BRINGUP_TEST 1
+#define PITCH_BRINGUP_TEST 0
 void GimbalInit()
 {
     gimbal_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
@@ -103,24 +103,12 @@ void GimbalInit()
     MIMotorInstancestop(pitch_motor); // 测试: 自由状态(可被重力/手移动), 仅读取上报角度
 #else
     MIMotorEnable(pitch_motor);
+    /* 不再调用 MIMotorInstanceetMechPositionToZero():
+     * 实测三次断电重启后, 电机上报角度在"自由下垂到底"的同一姿态下分别为 -1.16719 / -1.17675 / -1.16642 rad
+     * (极差 0.0103 rad = 0.59 度, 其中两次仅差 0.04 度), 说明"掉电后回到的基准"是稳定的 ——
+     * 因此改用固定绝对限位(robot_def.h 里按机械上下限实测值标定), 不需要也不应该再重设机械零位。
+     * 这样烧录、复位、断电重启、换电池全部一致。 */
 
-    /* ---- pitch 机械零位策略 ----
-     * MI 电机的机械零位(通信类型6)"掉电丢失"(见 mi_motor.c:202), 所以必须在合适的时候重设。
-     * 但"每次 MCU 上电都重设"是错的: 烧录/看门狗/引脚复位只复位 MCU, 电机一直带电、并保持上一次的位置,
-     * 此时把当前姿态设成 0, 行程区间就会随复位瞬间的姿态整体漂移 —— 表现就是"抬到某个角度并把那里当下限位,
-     * 遥控器再也打不到另一侧"。
-     * 正确做法: 只有"整机断电后重新上电"(POR)才重设零位; 其余复位保持电机原有零位(此时它依然有效)。
-     * 因此: 换电池后请先把云台摆到参考姿态(一般让它靠重力落到机械下限)再上电; 烧录/复位则完全不影响行程。
-     * 注: 本函数在 BSPIWDGLogResetCause() 清复位标志之前执行, 这里读到的是真实的上次复位原因。 */
-    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET)
-    {
-        MIMotorInstanceetMechPositionToZero(pitch_motor);
-        LOGINFO("[gimbal] POR reset detected: MI pitch mechanical zero re-established");
-    }
-    else
-    {
-        LOGINFO("[gimbal] non-POR reset (flash/soft/wdg/pin): keep MI pitch mechanical zero");
-    }
 #endif
 
     

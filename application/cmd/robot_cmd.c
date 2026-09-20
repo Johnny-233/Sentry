@@ -178,6 +178,21 @@ static void VisionJudge()
 static void BasicSet()
 {
     CalcOffsetAngle();
+
+    /* 首次进入时用"当前电机角度"作为 pitch 指令初值:
+     * pitch 指令与电机上报角度同坐标系(固定绝对限位), 从当前值起步可保证上电/模式切换不跳变,
+     * 也避免"初值 0 落在限位区间外被夹到某一端"导致云台突然转动。 */
+    static uint8_t pitch_cmd_inited = 0;
+    if (!pitch_cmd_inited)
+    {
+        MIMotorInstance *pm = GetPitchMotor();
+        if (pm != NULL && pm->measure.angle != 0.0f)
+        {
+            gimbal_cmd_send.pitch = pm->measure.angle;
+            pitch_cmd_inited = 1;
+        }
+    }
+
     GimbalPitchLimit();
     VisionJudge();
     //发射基本模式设定
@@ -652,7 +667,13 @@ static void AnythingStop()
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.loader_mode = LOAD_STOP;
-    gimbal_cmd_send.pitch = 0.0;
+    // 停止时把 pitch 指令设为当前电机角度(绝对坐标系), 而不是 0:
+    // 0 落在限位区间外, 重新进入云台模式时会被夹到某一端造成跳变。
+    {
+        MIMotorInstance *pm = GetPitchMotor();
+        if (pm != NULL)
+            gimbal_cmd_send.pitch = pm->measure.angle;
+    }
     DataLebel.ACEntryPoint = 1;
     //重置与小电脑通信失败的标志位
     DataLebel.cmd_error_flag=0;
