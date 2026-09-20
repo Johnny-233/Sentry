@@ -701,6 +701,52 @@ static void SendToUIData()
 }
 
 
+/* ==================== 云台跟踪调试采样(黑匣子) ====================
+ * 目的: 定位"动目标跟不上"到底是电流饱和、结构性问题还是增益不足。
+ * 只读数据, 不改任何控制量; 采满后自动冻结(RAM 里留 128 拍触发前 + 128 拍触发后), 断电/复位即清空。
+ * 用 OpenOCD 读 g_vt_head / g_vt_frozen / g_vt_buf 即可取出分析。
+ */
+#define VT_LEN 256
+typedef struct
+{
+    uint32_t frame_cnt; // 视觉帧计数(与上一拍不同 => 本拍收到了新帧)
+    float cmd_yaw;      // 视觉目标角(度)
+    float yaw_imu;      // IMU 总偏航角(度)
+    float gyro_z;       // 陀螺 z 轴(rad/s)
+    float vis_err;      // 视觉偏航误差(度)
+    float ang_out;      // yaw 角度环输出(= 速度环参考)
+    int16_t cur_out;    // yaw 速度环输出(= 电流指令, 饱和就看它)
+    uint16_t can_fire;
+} vt_sample_t;
+
+static vt_sample_t vt_buf[VT_LEN];
+volatile uint32_t g_vt_head = 0;   // 已写入样本数(环形)
+volatile uint8_t g_vt_frozen = 0;  // 1 = 已冻结, 可以 dump
+static uint32_t vt_post_cnt = 0;
+
+static void VisionTraceSample(void)
+{
+    if (g_vt_frozen)
+        return;
+
+    DJIMotorInstance *ym = GetYawMotor();
+    vt_sample_t *s = &vt_buf[g_vt_head % VT_LEN];
+    s->frame_cnt = g_vision_frame_cnt;
+    s->cmd_yaw = gimbal_cmd_send.yaw;
+    s->yaw_imu = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    s->gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2];
+    s->vis_err = minipc_recv_data->Vision.yaw;
+    s->ang_out = ym->motor_controller.angle_PID.Output;
+    s->cur_out = (int16_t)ym->motor_controller.speed_PID.Output;
+    s->can_fire = (uint16_t)minipc_recv_data->Vision.can_fire;
+    g_vt_head++;
+
+    if (vt_post_cnt == 0 && fabsf(s->vis_err) > 5.0f && g_vt_head > 64)
+        vt_post_cnt = 128; // 触发: 误差 >5° 说明正在追动目标, 再录 128 拍后冻结
+    else if (vt_post_cnt > 0 && --vt_post_cnt == 0)
+        g_vt_frozen = 1;
+}
+
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
@@ -722,5 +768,6 @@ void RobotCMDTask()
     EnemyJudge();
     SendMinipcData(&minipc_send_data);
     SendToUIData();
+    VisionTraceSample(); // 调试采样(只读)
 
 }

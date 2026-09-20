@@ -105,6 +105,9 @@ typedef struct
  */
 Minipc_Recv_s *minipcInit(UART_HandleTypeDef *_handle);
 
+/* 视觉帧计数(每次成功解帧 +1), 供调试采样判断新帧 */
+extern volatile uint32_t g_vision_frame_cnt;
+
 /**
  * @brief 发送视觉数据
  *

@@ -22,6 +22,9 @@ void VisionSetAltitude()
 
 static USARTInstance *minipc_usart_instance;
 
+/* 视觉帧计数: 调试采样用(每次成功解出一帧 +1), 不影响控制逻辑 */
+volatile uint32_t g_vision_frame_cnt = 0;
+
 /**
  * @brief 离线回调函数,将在daemon.c中被daemon task调用
  * @attention 由于HAL库的设计问题,串口开启DMA接收之后同时发送有概率出现__HAL_LOCK()导致的死锁,使得无法
@@ -52,6 +55,7 @@ static void DecodeMinpc(USARTInstance *instance, uint16_t len)
     uint16_t flag_register;
     DaemonReload(minipc_daemon_instance); // 喂狗
     get_protocol_info_vision(instance->recv_buff, len, &flag_register, &minipc_recv_data);
+    g_vision_frame_cnt++; // 调试用计数: 供云台跟踪采样判断新帧
 }
 
 Minipc_Recv_s *minipcInit(UART_HandleTypeDef *_handle)
