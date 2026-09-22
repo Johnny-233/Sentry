@@ -75,10 +75,15 @@ void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-  huart3.Init.BaudRate = 100000;
-  huart3.Init.WordLength = UART_WORDLENGTH_9B;
+  /* 遥控：**新遥控 VT13/VT03（图传链路，带键鼠）= 921600 8N1**。
+     旧的 DBUS/Dt7 接收机是 100000 / 9B / EVEN（8 数据位+偶校验）；
+     换回旧遥控时把这三行改回 100000 / UART_WORDLENGTH_9B / UART_PARITY_EVEN，
+     并同步 project/modules/remote/remote_config.h 的机型宏
+     （Remote::init() 会校验串口参数，不匹配直接拒绝初始化）。 */
+  huart3.Init.BaudRate = 921600;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_EVEN;
+  huart3.Init.Parity = UART_PARITY_NONE;
   huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -180,7 +185,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     hdma_usart1_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart1_rx.Init.Mode = DMA_NORMAL;
+    /* NOTE(阶段5): 接收 DMA 必须是 DMA_CIRCULAR —— project/modules/serial 的
+       "DMA circular + IDLE" 设计依赖它(空闲只重开接收, 不重置计数器)。
+       原来 CubeMX 生成的是 DMA_NORMAL: 收满 256 字节(遥控约 12 帧)流就自己停了(EN=0),
+       而 HAL 的 RxState 还停在 BUSY_RX -> 再调 HAL_UARTEx_ReceiveToIdle_DMA 直接返回
+       HAL_BUSY, 链路从此卡死(现象: 上电十几帧后遥控/视觉彻底不动, SR 里 RXNE=1 挂着)。
+       发送 DMA 保持 DMA_NORMAL 是正确的。以后用真实 .ioc 重新生成时, 记得把这三个
+       接收流的 Mode 也设成 Circular。 */
+    hdma_usart1_rx.Init.Mode = DMA_CIRCULAR;
     hdma_usart1_rx.Init.Priority = DMA_PRIORITY_VERY_HIGH;
     hdma_usart1_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_usart1_rx) != HAL_OK)
@@ -226,7 +238,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     hdma_usart3_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart3_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart3_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart3_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart3_rx.Init.Mode = DMA_CIRCULAR;
     hdma_usart3_rx.Init.Priority = DMA_PRIORITY_LOW;
     hdma_usart3_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     if (HAL_DMA_Init(&hdma_usart3_rx) != HAL_OK)
@@ -272,7 +284,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     hdma_usart6_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart6_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart6_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart6_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart6_rx.Init.Mode = DMA_CIRCULAR;
     hdma_usart6_rx.Init.Priority = DMA_PRIORITY_HIGH;
     hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
     hdma_usart6_rx.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_FULL;

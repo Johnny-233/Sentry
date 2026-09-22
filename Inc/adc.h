@@ -34,11 +34,15 @@ extern "C" {
 
 extern ADC_HandleTypeDef hadc1;
 
+/* 母线电压检测: VCC_BAT 经 100k/10k 分压 → PF10 = ADC3_IN8 (见 MIGRATION_NOTES.md 句柄表) */
+extern ADC_HandleTypeDef hadc3;
+
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
 
 void MX_ADC1_Init(void);
+void MX_ADC3_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 

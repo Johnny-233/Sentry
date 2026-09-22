@@ -20,7 +20,7 @@ target_include_directories(stm32cubemx INTERFACE
     ../../Drivers/STM32F4xx_HAL_Driver/Inc 
     ../../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy 
     ../../Middlewares/Third_Party/FreeRTOS/Source/include 
-    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS 
+    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 
     ../../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F 
     ../../Middlewares/ST/STM32_USB_Device_Library/Core/Inc 
     ../../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc 
@@ -28,8 +28,6 @@ target_include_directories(stm32cubemx INTERFACE
     ../../Drivers/CMSIS/Include 
     ../../Middlewares/ST/ARM/DSP/Include/dsp 
     ../../Middlewares/ST/ARM/DSP/Include 
-    ../../Middlewares/Third_Party/SEGGER/RTT 
-    ../../Middlewares/Third_Party/SEGGER/Config 
     ../../Middlewares/ST/ARM/DSP/Inc
 )
 
@@ -97,15 +95,13 @@ target_sources(stm32cubemx INTERFACE
     ../../Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c 
     ../../Middlewares/Third_Party/FreeRTOS/Source/tasks.c 
     ../../Middlewares/Third_Party/FreeRTOS/Source/timers.c 
-    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/cmsis_os.c 
+    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.c 
     ../../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c 
     ../../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c 
     ../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c 
     ../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c 
     ../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c 
     ../../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c 
-    ../../Middlewares/Third_Party/SEGGER/RTT/SEGGER_RTT_printf.c 
-    ../../Middlewares/Third_Party/SEGGER/RTT/SEGGER_RTT.c 
     ../../Middlewares/Third_Party/FreeRTOS/Source/croutine.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/list.c
@@ -113,7 +109,7 @@ target_sources(stm32cubemx INTERFACE
     ../../Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/tasks.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/timers.c
-    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/cmsis_os.c
+    ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
     ../../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c
     ../../startup_stm32f407xx.s

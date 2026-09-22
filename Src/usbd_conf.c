@@ -27,7 +27,10 @@
 #include "usbd_cdc.h"
 
 /* USER CODE BEGIN Includes */
-#include "bsp_dwt.h"
+/* 这里原来 include 旧 C bsp 的 "bsp_dwt.h" 来调 DWT_Delay()。
+   现在用户代码是 C++ 的 project/, 它的 bsp_dwt.h 没有 extern "C",
+   从 C 里直接调会因名字修饰链接不到; 而 CubeMX 生成文件不该反向依赖应用层,
+   所以改用 HAL_Delay() (时基 = TIM14, 见 stm32f4xx_hal_timebase_tim.c)。 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,9 +101,9 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
 
   // 上电后重新枚举usb设备
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
-    DWT_Delay(0.1);
+    HAL_Delay(100);
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_SET);
-    DWT_Delay(0.1);
+    HAL_Delay(100);
 
   /* USER CODE END USB_OTG_FS_MspInit 1 */
   }

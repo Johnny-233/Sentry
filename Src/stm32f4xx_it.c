@@ -121,8 +121,9 @@ void HardFault_Handler(void)
   g_fault_bfar = SCB->BFAR;
   g_fault_mmfar = SCB->MMFAR;
 
-  LOGERROR("[fault] HardFault! CFSR=0x%08X HFSR=0x%08X BFAR=0x%08X MMFAR=0x%08X",
-           (unsigned)g_fault_cfsr, (unsigned)g_fault_hfsr, (unsigned)g_fault_bfar, (unsigned)g_fault_mmfar);
+  /* 日志走 project/ 的 bsp_log (RTT): 旧 C 的 LOGERROR 已随 bsp/ 退出编译 */
+  LOG_ERR(LOG_MOD_SYS, "fault", "[fault] HardFault! CFSR=0x%08X HFSR=0x%08X BFAR=0x%08X MMFAR=0x%08X",
+          (unsigned)g_fault_cfsr, (unsigned)g_fault_hfsr, (unsigned)g_fault_bfar, (unsigned)g_fault_mmfar);
 
 #if FAULT_AUTO_RESET
   if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) == 0u) // 没有调试器挂着 -> 复位重启

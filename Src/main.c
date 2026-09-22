@@ -35,9 +35,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "robot.h"
-#include "bsp_log.h"
-#include "bsp_iwdg.h"
+/* 应用层入口不在 main.c 里挂, 见 Src/freertos.c 的 MX_FREERTOS_Init()
+   (要排在 osKernelInitialize() 之后)。 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,6 +101,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
+  MX_ADC3_Init();
   MX_CAN1_Init();
   MX_CAN2_Init();
   MX_SPI1_Init();
@@ -121,15 +121,14 @@ int main(void)
   MX_CRC_Init();
   MX_DAC_Init();
   /* USER CODE BEGIN 2 */
-	RobotInit(); // 唯一的初始化函数
-  LOGINFO("[main] SystemInit() and RobotInit() done");
-
-  // 看门狗: 放在 RobotInit 之后、调度器启动之前。
-  // 初始化阶段(IMU 校准等)最坏可能超过超时时间, 所以不在初始化期间挂狗, 避免正常启动被复位;
-  // 运行期由 daemon 任务按三个控制任务的心跳喂狗(见 application/robot_task.h)。
-  BSPIWDGLogResetCause();              // 先把上次复位原因打出来, 再清标志
-  BSPIWDGInit(BSP_IWDG_RELOAD_1S);
+  /* 应用层初始化不在这里, 而是放进 MX_FREERTOS_Init() 的 USER CODE Init:
+     Robot_Init() 内部要用 CMSIS-RTOS2 (osThreadNew) 建任务, 必须排在
+     osKernelInitialize() 之后。见 Src/freertos.c。
+     旧 C 应用层 (RobotInit/BSPIWDG) 已随 application//Modules//bsp/ 退出编译。 */
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
 
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
