@@ -4,6 +4,34 @@ static GimbalAlgorithm_t gimbal_algorithm_yaw;
 static GimbalAlgorithm_t gimbal_algorithm_pitch;
 
 /**
+ * @brief 复位自适应滤波的内部状态
+ * @note  从 0 电流/停止态回到控制态时必须调用: 否则 filtered_cmd / last_cmd 还是停机前的旧值,
+ *        云台会从旧值缓慢爬向新目标(表现为"重新开控制档时云台自己大幅旋转")
+ */
+void GimbalAlgorithmReset(void)
+{
+    gimbal_algorithm_yaw.cmd = 0.0f;
+    gimbal_algorithm_yaw.last_cmd = 0.0f;
+    gimbal_algorithm_yaw.cmd_delta = 0.0f;
+    gimbal_algorithm_yaw.filtered_cmd = 0.0f;
+    gimbal_algorithm_yaw.error = 0.0f;
+    gimbal_algorithm_yaw.error_rate = 0.0f;
+    gimbal_algorithm_yaw.static_error_accumulator = 0.0f;
+    gimbal_algorithm_yaw.last_cmd_delta = 0.0f;
+    gimbal_algorithm_yaw.direction_changed = false;
+
+    gimbal_algorithm_pitch.cmd = 0.0f;
+    gimbal_algorithm_pitch.last_cmd = 0.0f;
+    gimbal_algorithm_pitch.cmd_delta = 0.0f;
+    gimbal_algorithm_pitch.filtered_cmd = 0.0f;
+    gimbal_algorithm_pitch.error = 0.0f;
+    gimbal_algorithm_pitch.error_rate = 0.0f;
+    gimbal_algorithm_pitch.static_error_accumulator = 0.0f;
+    gimbal_algorithm_pitch.last_cmd_delta = 0.0f;
+    gimbal_algorithm_pitch.direction_changed = false;
+}
+
+/**
  * @brief 方向变化检测函数
  */
 static void DetectDirectionChange(GimbalAlgorithm_t *gimbal)

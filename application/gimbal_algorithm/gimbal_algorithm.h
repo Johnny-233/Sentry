@@ -29,6 +29,9 @@ typedef struct
     float flag;
 } GimbalAlgorithm_t;
 
+/* 复位自适应滤波内部状态(从 0 电流态回到控制态时必须调用) */
+void GimbalAlgorithmReset(void);
+
 float Cal_FollowControl_Set_Yaw(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv);
 float Cal_FollowControl_Set_Pitch(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv);
 float Cal_FollowControl_Feedforward(attitude_t gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv);

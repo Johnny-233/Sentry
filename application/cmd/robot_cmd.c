@@ -701,6 +701,28 @@ static void ControlDataDeal()
     }
 }
 
+/* 从"0 电流/停止"回到云台控制档时, 把绝对角度指令重置为当前实际姿态。
+ * 不这样做的话: gimbal_cmd_send.yaw/pitch 是跨模式保留的绝对指令, 若在 0 电流模式下用手转动了云台,
+ * 重新开控制档时云台会回头去追那个过期指令(表现为"yaw 自己大幅旋转"), 而不是就近跟目标。
+ * 同时清掉自适应滤波的历史状态, 避免从旧值缓慢爬向新目标。 */
+static void GimbalCmdReinitOnModeEntry(void)
+{
+    static gimbal_mode_e last_mode = GIMBAL_ZERO_FORCE;
+
+    if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE && last_mode != GIMBAL_GYRO_MODE)
+    {
+        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle; // 以当前 IMU 偏航角为起点
+        MIMotorInstance *pm = GetPitchMotor();
+        if (pm != NULL)
+            gimbal_cmd_send.pitch = pm->measure.angle;                          // pitch 以当前电机角度为起点
+        GimbalAlgorithmReset();
+        DataLebel.ACEntryPoint = 1; // 自动模式用平滑进入
+        LOGINFO("[cmd] gimbal re-enabled: yaw cmd reset to %.1f, pitch cmd=%.3f",
+                (double)gimbal_cmd_send.yaw, (double)gimbal_cmd_send.pitch);
+    }
+    last_mode = gimbal_cmd_send.gimbal_mode;
+}
+
 static void EnemyJudge()
 {
     if(referee_data->GameRobotState.robot_id>7)
@@ -799,6 +821,7 @@ void RobotCMDTask()
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
     ControlDataDeal();
+    GimbalCmdReinitOnModeEntry(); // 刚回到控制档时, 把过期指令重置为当前姿态(见函数注释)
 
     // 设置视觉发送数据,还需增加加速度和角速度数据
     // 推送消息,双板通信,视觉通信等
