@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include "can.h"
 
-#define CAN_MX_REGISTER_CNT 16     // 这个数量取决于CAN总线的负载
+#define CAN_MX_REGISTER_CNT 24     // CAN 实例注册表容量（本工程用 13；溢出后新实例是静默丢弃、很难查，故放宽到 24）
 #define MX_CAN_FILTER_CNT (2 * 14) // 最多可以使用的CAN过滤器数量,目前远不会用到这么多
 
 #ifdef __cplusplus

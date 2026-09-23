@@ -569,14 +569,9 @@ static void Sentry_GimbalAC()
 
         if (DataLebel.ACEntryPoint)
         {
-            /* 平滑进入：沿**指令自身**每周期限步长推进到 PIT（0.02rad/周期，200Hz 下约 4rad/s），
-             * 推进到 PIT 后退出、转入正常巡逻。既避免停机恢复时的硬跳/撞限位，又不会把自己卡死。
-             *
-             * ⚠不能写成 `cmd = 实测角度 ± step`（原地版本就是这么写的）：那样位置误差被永远压在
-             * 一拍步长(0.02rad)以内，kp*0.02≈0.3N·m 抬不动炮管 —— 从 C 档(零电流)切到 S 档时，
-             * 炮管正被重力压在机械下限上，命令每拍都从"实测+0.02"重算，于是电机一直顶着却动不了、
-             * ACEntryPoint 永远退不出、S 档 pitch 永远不上下摆动。现场读数正是这个状态：
-             * pitch_cmd=-0.020(被限位夹住)、pitch_act=0.0010(实际压在下限)、torque=-0.560N·m(在出力)。 */
+            /* 平滑进入：沿指令自身每周期限步长(0.02rad≈4rad/s)推进到 PIT，避免硬跳/撞限位。
+               不能写成 `cmd = 实测角度 ± step`：误差会被永远压在一拍步长内，kp*step 的力矩
+               抬不动炮管（炮管压在下限时），命令就永远追不上、巡逻也进不了稳态。 */
             float err_cmd = PIT - gimbal_cmd_recv.pitch;
             const float entry_step = 0.02f; // rad/周期
             if (fabsf(err_cmd) <= entry_step)

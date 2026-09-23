@@ -15,12 +15,9 @@
 #define DJIM_MAX_INSTANCE 16   // 最大电机实例数
 #define DJIM_MAX_GROUP 6       // 最大发送组数
 
-/* 速度反馈一阶低通系数（0~1，越小滤波越强）。
-   ⚠旧固件 Modules/motor/DJImotor/dji_motor.c 的对应系数是 SPEED_SMOOTH_COEF = 0.85
-   （speed_aps = 0.15*old + 0.85*new，属于弱滤波）；框架原值 0.15 在同一采样率下相位
-   滞后大约 5~6 倍，kp=10 的速度环装上去就会明显抖。为与旧 PID 数字匹配，这里用 0.85。 */
+/* 速度/电流反馈一阶低通系数：与旧固件 SPEED_SMOOTH_COEF / CURRENT_SMOOTH_COEF 一致
+   （框架原值 0.15 相位滞后大 5~6 倍，kp=10 的速度环会抖） */
 #define DJIM_VELOCITY_LPF_ALPHA 0.85f
-/* 电流反馈一阶低通系数，对应旧固件 CURRENT_SMOOTH_COEF = 0.9（电流内环的反馈用它） */
 #define DJIM_CURRENT_LPF_ALPHA 0.9f
 
 class DJIMotor {
@@ -49,10 +46,9 @@ public:
         float reduction_ratio;          // 减速比，电机轴 / 输出轴，默认 1.0
         PID::Config pid_angle;          // 位置环 PID 配置
         PID::Config pid_velocity;       // 速度环 PID 配置
-        /* 电流内环 PID 配置 + 使能开关（替代旧固件 close_loop_type 里的 CURRENT_LOOP）。
-           启用后：速度环输出 = 电流参考，反馈取电调上报电流，电流 PID 输出才发给电调。
-           旧底盘/摩擦轮/拨盘都是"速度环→电流环"两级，缺这一级等效增益差 2~3 倍。 */
-        PID::Config pid_current;        // 电流内环 PID 配置（安培域，见 pid_port.h）
+        /* 电流内环（旧 close_loop_type 的 CURRENT_LOOP）：速度环输出作参考、反馈取电调实测
+           电流，缺这一级等效增益会差 2~3 倍。配置在安培域，见 pid_port.h */
+        PID::Config pid_current;
         uint8_t current_loop_enable;    // 1 = 启用电流内环
         uint8_t pos_freq_div;           // 位置环分频，更新频率=1000Hz/pos_freq_div
         float initial_angle;            // 初始角度 [deg]（正值=电机当前朝向），内部取反存入 offset
@@ -68,12 +64,10 @@ public:
     void setVelocityFF(float velocity);              // 替代 DJIMotor_Set_VelocityFF
     void setCurrentFF(float current);                // 替代 DJIMotor_Set_CurrentFF
 
-    static void timbaseSelect(TIM_HandleTypeDef* htim);  // 替代 DJIMotor_TimbaseSelect（本工程已改为仅记录，不再挂中断）
+    static void timbaseSelect(TIM_HandleTypeDef* htim);  // 本工程改为仅记录句柄, 电机环不挂中断
 
-    /* 电机环更新入口（替代"挂在 1ms 定时器中断上"的老机制）。
-       本工程按旧固件 Modules/motor/motor_task.c 的节奏跑 200Hz(5ms)：所有注册实例跑一次
-       速度环 PID，再按 CAN 分组各发一帧控制报文。由应用层 MOTOR 任务 5 分频调用。
-       注意调用周期必须等于各 pid_velocity 的 period(ms)（本工程填 5）。 */
+    /* 电机环入口：跑一遍所有实例的速度环 PID 并按组发 CAN。由 MOTOR 任务 5 分频调成 200Hz，
+       调用周期必须等于各 pid_velocity 的 period(ms)（本工程填 5）。 */
     static void taskUpdate();
 
     // —— 跨模块读取的状态（公开直接读）——

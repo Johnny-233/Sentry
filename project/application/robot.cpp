@@ -83,9 +83,7 @@ static void StartINSTASK(void *argument)
  *  MOTOR 任务: 1kHz
  *  电机闭环已由 DJIMotor 的 htim5 中断接管, 这里只保留心跳与超时打印
  * ==========================================================================*/
-/* 调试用（见 MIGRATION_NOTES.md 阶段 5.1）：MOTOR 任务自身的实际周期(DWT 周期数)。
-   168MHz 下 1ms = 168000 cycle。这个任务同时喂 daemon/serial 的 1ms 超时，
-   一旦被别的任务饿死，遥控/视觉的整帧超时会跟着误判，所以留个实测值。 */
+/* 调试用：MOTOR 任务实际周期(DWT 周期数，168MHz 下 1ms=168000)，确认 1kHz 没被别的任务饿死 */
 volatile uint32_t g_motor_task_dcyc = 0;
 volatile uint32_t g_motor_task_maxdcyc = 0;
 
@@ -111,30 +109,13 @@ static void StartMOTORTASK(void *argument)
             last_task_cyc = now_task_cyc;
         }
 
-        /* ---- 对方框架"1ms 时基"的入口 ----------------------------------------
-         * 对方的电机环/各模块 Daemon 离线检测/Serial 的整帧超时，原本都挂在一个 1ms 的
-         * 定时器中断上（`DJIMotor::timbaseSelect(&htim5)` + `TIM::startIT()`，最终由
-         * `USER_TIM_PeriodElapsedCallback(htim)` 分发）。
-         * 但**本板的 TIM5 不满足条件**：Src/tim.c 里 htim5 是 PWM 配置（PSC=0/ARR=65535，
-         * 给灯用），Src/stm32f4xx_it.c 既没有 TIM5_IRQHandler、NVIC 也没使能 TIM5_IRQn，
-         * Src/main.c 的 HAL_TIM_PeriodElapsedCallback 也没有转调 USER_TIM_PeriodElapsedCallback
-         * —— 也就是说硬件中断这条路在本板是断的。
-         * 按"控制周期走自己的任务"的方案，这里用 1kHz 的 MOTOR 任务**合成**这个 tick：
-         * 它一次调用就驱动了所有注册在 htim5 上、周期为 1ms 的 Daemon/Serial 超时。
-         * 注意：这个 tick 的周期必须与各 Daemon 的周期配置一致（都是 1ms）。
-         * 电机环**不在这里**：旧固件的电机环是 200Hz 跑 PID，见下面 5 分频的 taskUpdate()。 */
+        /* 1ms 时基：本板 TIM5 是 PWM 配置、NVIC 没开 TIM5_IRQn，框架原来那条硬件中断是断的，
+           所以用 1kHz 的 MOTOR 任务合成这个 tick，喂各 Daemon/Serial 的超时（周期都配 1ms）。 */
         USER_TIM_PeriodElapsedCallback(&htim5);
 
-        /* ---- 电机环：与旧固件同节奏的 200Hz(5ms) ------------------------------
-         * 旧固件 Modules/motor/motor_task.c 就是：
-         *     if(cnt%5==0)  DJIMotorControl();   // 200hz
-         *     if(cnt%10==0) MiMotorControl();    // 100hz
-         * 而对方的框架把电机环挂在 1ms 的定时器中断上（DJIMotor::timbaseSelect + TIM::startIT），
-         * 采样率×5 会让速度反馈里的高频噪声整段进 PID（框架速度还带一阶低通，等效噪声带宽
-         * 也跟着抬高），表现为底盘/摩擦轮电流抖动、甚至顶到 MaxOut。
-         * 为了**保留旧固件那套 PID 数字、不重新整定**，这里按 5ms 调一次电机环；
-         * chassis.cpp / shoot.cpp 里 pid_velocity 的 period 也相应填 5(ms)。
-         * 注：DJIMotor::timbaseSelect() 已改成不注册定时器回调，避免电机环被 1ms 再驱动一遍。 */
+        /* 电机环：旧固件是 `if(cnt%5==0) DJIMotorControl();` 即 200Hz；框架原本挂在 1ms 中断上，
+           采样率×5 会让噪声整段进 PID（电流抖/顶 MaxOut）。为保留旧 PID 数字，这里按 5ms 调，
+           chassis.cpp / shoot.cpp 的 pid_velocity.period 也填 5ms。 */
         static uint8_t motor_cnt = 0;
         if (++motor_cnt >= 5)
         {
@@ -142,9 +123,7 @@ static void StartMOTORTASK(void *argument)
             DJIMotor::taskUpdate();
         }
 
-        /* MI 电机(云台 pitch)的周期重发: 原 Modules/motor/motor_task.c 里是
-           `if(cnt%10==0) MiMotorControl();` —— 1kHz 任务里的 100Hz。
-           MI 电机收不到帧会自己掉使能, 所以这个重发是必须的(与原来同一个节奏)。 */
+        /* MI 电机重发：旧固件 `if(cnt%10==0) MiMotorControl();` = 100Hz；收不到帧它会自己掉使能 */
         static uint8_t mi_cnt = 0;
         if (++mi_cnt >= 10)
         {

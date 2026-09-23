@@ -163,11 +163,8 @@ void GimbalInit()
 
 static uint8_t pitch_homed = 0;    /* 1 = 本次使能期间已完成回零 */
 
-/* 请求"重新回零"。**为什么需要**：MI 电机上报角度的绝对基准只在"连续通信、未被复位"期间有效。
- * 一旦电机掉线或重新使能（调试器 halt 过 MCU、模式切到零电流再切回来、上电重连……），
- * 之前 setMechPositionToZero() 建立的机械零位就作废了；此时若继续用旧坐标系发位置指令，
- * 电机会朝错误方向顶到限位，表现就是"pitch 控不了 / 顶死不动"。
- * 所以每次重新进入云台控制态都强制重做一次回零（约 2s、推力很小、有限时保护）。 */
+/* 请求重新回零：MI 电机掉线/重新使能后，setMechPositionToZero() 建立的零位会失效，
+   继续在旧坐标系里发指令它就会顶到限位（现象："pitch 控不了"）。 */
 static uint8_t homing_reset_req = 0;
 static void PitchHomingRequest(void)
 {
@@ -201,10 +198,8 @@ static uint8_t PitchHomingTask(void)
 
     if (state == 0)
     {
-        /* 先把运行模式显式写回"运控模式"(功能码 0x7005 = 0)。
-         * MI 电机若停在位置模式(1)/速度模式(2)/电流模式(3)，会**完全忽略**运控模式(type 1)
-         * 的位置指令 —— 现象正好是"反馈正常、总线正常、但一点力都不出、手能推动、回零也不动"。
-         * 写参数后要等它生效(约几十 ms)再使能，否则可能被旧的运行模式吃掉。 */
+        /* 先把运行模式写回运控模式(0x7005=0)：MI 电机若停在位置/速度/电流模式会完全忽略
+           type1 位置指令（现象：有反馈、不出力、手能推）。写完等几十 ms 再使能。 */
         pitch_motor.modeSwitch(0);
         wd_cnt = 0;
         state = 5;
@@ -247,11 +242,8 @@ static uint8_t PitchHomingTask(void)
 
         if (stall_cnt > HOMING_STALL_CNT)
         {
-            /* 判定"这是不是真的机械下限"用**力矩**而不是"角度有没有变"：
-             *  - 炮管本来就被重力垂在机械下限上（比如从零电流档切回来）时，回零推不动它，
-             *    但电机会一直顶着力（max_torque 明显非零）=> 这就是合法下限 ✓
-             *  - 电机没真正使能 / 处于故障态时，角度不变且**力矩全程≈0** => 假回零，判失败 ✗
-             * （我曾经用"角度变化 < 0.05rad 就失败"，结果把"本来就在下限上"误判成故障。） */
+            /* 用"力矩有没有出"而不是"角度有没有变"判断是否真到下限：炮管本来就被重力压在
+               下限上时推不动但有力矩=合法；电机没使能/故障则全程力矩≈0。 */
             if (max_torque < 0.05f)
             {
                 LOG_ERR(LOG_MOD_GIMB, "homing",
@@ -324,13 +316,9 @@ static void GimbalStateSet()
     {
     // 停止
     case GIMBAL_ZERO_FORCE:
-        /* pitch（MI 电机）**不能**用通信类型 4（reset/stop）！
-         * 实测：发过 type4 之后电机就不再响应运控模式(type1)的位置指令 —— 现象正是
-         * "初次上电正常，切到 C 档(零电流)再切回 N/S 后 pitch 再也控不动、手能推动、回零也不动"，
-         * 只有彻底断电才恢复。
-         * 改成发一帧"零刚度、零力矩"的运控帧(kp=kd=0)：电机留在运控模式、不出力(可自由推动)、
-         * 内部位置基准也保得住；MiMotorControl() 会按 100Hz 持续重发这一帧，不需要额外维护。
-         * pitch_homed 保持不变：由它决定下次进入控制态要不要重新回零。 */
+        /* pitch 不能发 MI type4(reset/stop)：发过之后它就不再响应 type1 指令、只有断电才恢复
+           （现象：切 C 档再切回 N 就再也控不了）。改发 kp=kd=0 的零力矩运控帧：不出力、可自由
+           推动、位置基准不丢，MiMotorControl() 会 100Hz 持续重发。pitch_homed 保持不变。 */
         pitch_motor.locationControl(pitch_motor.angle_, 0.0f, 0.0f);
         yaw_motor.setEnable(0);        // 原 DJIMotorStop(yaw_motor)
         motor_init = 0;
@@ -346,9 +334,8 @@ static void GimbalStateSet()
         pitch_motor.stop(); // 测试: 保持自由, 绝不用未标定的限位去驱动机构
 #else
 #if PITCH_HOMING_ENABLE
-        /* 只有"零位可能已失效"时才重做回零：上电后第一次进入控制态（pitch_homed 初值 0）、
-         * 或上次回零失败过。正常 C→N 切换零位是保住的（见 ZERO_FORCE 分支的零力矩释放），
-         * 不必每次都重来（否则每次切档都要 2s 慢速找限位）。 */
+        /* 只在零位可能失效时回零：上电后首次进入控制态、或上次回零失败过。
+           正常 C→N 零位是保住的（见 ZERO_FORCE 的零力矩释放），不必每次重来。 */
         if (motor_init == 0 && !pitch_homed)
             PitchHomingRequest();
         if (PitchHomingTask()) // 回零完成前不执行正常位置控制(期间只做"缓慢找下限")
@@ -394,9 +381,7 @@ static void SendGimbalData()
     if (yaw_single_round < 0.0f)
         yaw_single_round += 360.0f;
     gimbal_feedback_data.yaw_motor_single_round_angle = (uint16_t)yaw_single_round;
-    /* 原 gimbal_feedback_data->pitch_angle = pitch_motor->measure.angle（移植时漏了这一句，
-     * 导致 UI/自瞄读到的 pitch 恒为 0）→ 补上。 */
-    gimbal_feedback_data.pitch_angle = pitch_motor.angle_;
+    gimbal_feedback_data.pitch_angle = pitch_motor.angle_; /* 原 C 版这句移植时漏了(UI/自瞄恒读 0) */
 }
 
 /* 机器人云台控制核心任务 */

@@ -65,8 +65,7 @@ static const PidPort kChassisSpeedPid = {
 };
 
 /* 旧 current_PID（底盘）: Kp=0.5, Ki=0, Kd=0, IntegralLimit=3000, MaxOut=15000(ESC 计数)。
-   本框架电流内环的参考/反馈都在"安培"域（下面的 pidPort 用 output_scale=1），
-   所以 Kp/Ki 数值与旧版相同，只有 MaxOut 要从计数换算成安培: 15000/819.2 = 18.31A。 */
+   内环在安培域跑，故只有 MaxOut 要换算: 15000*PID_SCALE_M3508 = 18.31A。 */
 static const PidPort kChassisCurrentPid = {
     .Kp = 0.5f, // 0.4
     .Ki = 0.0f,

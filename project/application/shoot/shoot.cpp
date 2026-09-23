@@ -45,8 +45,8 @@ static const PidPort kFrictionSpeedPid = {
     .Improve = PID_Integral_Limit,
 };
 
-/* 旧 current_PID（摩擦轮/拨盘）: 摩擦轮 Kp=0.7 Ki=0.1 MaxOut=15000, 拨盘 Kp=0.7 Ki=0.1 MaxOut=5000,
-   都是 ESC 计数域。内环在安培域跑(pidPort output_scale=1), 故只有 MaxOut 需要换算。 */
+/* 旧 current_PID（摩擦轮/拨盘）: Kp=0.7 Ki=0.1, MaxOut 分别 15000/5000(ESC 计数)。
+   内环在安培域跑，故只有 MaxOut 要换算。 */
 static const PidPort kFrictionCurrentPid = {
     .Kp = 0.7f, // 0.7
     .Ki = 0.1f, // 0.1

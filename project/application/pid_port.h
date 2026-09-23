@@ -63,15 +63,10 @@
 #define PID_SCALE_GM6020 (1.0f / 25000.0f) // 6020 电压控制: 25000 计数 = 1.0
 #define PID_SCALE_COUNTS 1.0f              // 输出本身就是计数(应用层自闭环)时用这个
 
-/* ---- 内环电流 PID（旧 current_PID）的换算说明 ----------------------------------
- * 旧固件底盘/摩擦轮/拨盘的 close_loop_type 含 CURRENT_LOOP，是"速度环 → 电流环"串级：
- *   速度 PID 输出(计数) → 电流 PID 的参考；电流 PID 的反馈是电调上报电流(计数) → 输出发给电调。
- * 本框架的电流内环（DJIMotor::current_loop_enable）参考与反馈都在**安培**域：
- *   target_current_[A] → 电流 PID → target_current_[A] → 再换算成计数发 CAN。
- * 因此内环要用 pidPort(旧配置, 1.0f, period_ms)：输出量纲(安培)与误差量纲(安培)相同，
- * Kp/Ki 数值与旧版完全一致（Ki 的 /1000 仍是"秒 → 毫秒"），
- * **只有 MaxOut 需要从 ESC 计数换算成安培**（如 15000 * PID_SCALE_M3508 = 18.31A），
- * 直接在 PidPort 里写好。Kd 若要换算需再乘 PID_SCALE_*，本工程三个电流环 Kd 都是 0。 */
+/* ---- 内环电流 PID（旧 current_PID）-----------------------------------------
+ * 旧底盘/摩擦轮/拨盘是"速度环 → 电流环"串级；本框架内环的参考与反馈都在**安培**域，
+ * 所以用 pidPort(旧配置, 1.0f, period_ms)：Kp/Ki 数值与旧版一致，只有 MaxOut 要从
+ * ESC 计数换算成安培（如 15000*PID_SCALE_M3508 = 18.31A），直接在 PidPort 里写。 */
 
 /** 旧 C PID 的配置（字段名与 Motor_Init_Config_s 里的一致，便于照抄） */
 struct PidPort {

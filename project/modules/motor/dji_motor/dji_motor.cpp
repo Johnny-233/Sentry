@@ -155,17 +155,13 @@ void DJIMotor::timCallback(void* device)
     taskUpdate();
 }
 
-/* 调试用（见 MIGRATION_NOTES.md 阶段 5.1）：电机环执行次数与相邻两次的 DWT 周期差。
-   168MHz 下理论周期：电机环 5ms = 840000 cycle，正常频率 = 200Hz。
-   调试器一次读取即可验证"电机环确实跑在 200Hz 且没有长间隔"（DWT->CYCCNT 32 位，
-   25.6s 回绕，差值用无符号减法天然正确）。 */
+/* 调试用：电机环执行次数与相邻两次的 DWT 周期差（168MHz 下 5ms = 840000 cycle），
+   调试器读一次即可确认电机环确实跑在 200Hz 且没有长间隔 */
 volatile uint32_t g_motor_loop_cnt = 0;
 volatile uint32_t g_motor_loop_dcyc = 0;
 volatile uint32_t g_motor_loop_maxdcyc = 0;
 
-/* 电机环本体：更新所有注册实例的 PID（速度环），再按组发一帧 CAN 控制报文。
-   调用周期 = 速度环 PID 的 period(ms)。本工程由 MOTOR 任务 5 分频以 200Hz 调用，
-   与旧固件 `if(cnt%5==0) DJIMotorControl();` 同节奏（见 application/robot.cpp）。 */
+/* 电机环本体：跑一遍各实例速度环 PID，再按组发一帧 CAN。调用周期见 robot.cpp 的 5 分频 */
 void DJIMotor::taskUpdate()
 {
     static uint32_t last_cyc = 0;
@@ -232,13 +228,8 @@ void DJIMotor::setCurrentFF(float current)
 
 // 自己配一个1000Hz的定时器，用于更新PID。硬实时可靠性比RTOS软件定时器更高，且不受其他代码的影响。
 // DJI电机控制对实时性要求较高，尤其是位置环，建议使用定时器中断来更新PID。
-/* 只记录时基句柄，**不再**把电机环注册到定时器中断上。
-   原因：旧固件(Modules/motor/motor_task.c)的电机环本来就是 200Hz(5ms)跑一次 PID，
-   而这个框架把它挂在 1ms 的 htim5 中断上 —— 采样率翻 5 倍会让速度反馈里的高频噪声
-   整段进入 PID（框架的速度还带一阶低通，等效噪声带宽也一起抬高），
-   表现为底盘/摩擦轮电流抖动、甚至顶到 MaxOut。
-   为保持旧 PID 参数（不重新整定），改为由应用层每 5ms 调一次 DJIMotor::taskUpdate()，
-   采样条件与旧固件一致；挂在 htim5 上的各 Daemon/Serial 仍是 1ms tick，不受影响。 */
+/* 不再把电机环挂到定时器中断上：框架原本挂 1ms，采样率是旧固件的 5 倍，会让噪声整段进
+   PID（电流抖/顶 MaxOut）。改由应用层每 5ms 调 taskUpdate()，见 robot.cpp。 */
 void DJIMotor::timbaseSelect(TIM_HandleTypeDef* htim)
 {
     (void)htim;
