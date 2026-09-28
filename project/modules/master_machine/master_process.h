@@ -12,7 +12,7 @@
 #include "ahrs.h"
 
 #define Minipc_Recv_sIZE 36u // 新协议27字节,留余量
-#define Minipc_Send_sIZE 50u // 1(header) + 38(struct) + 余量
+#define Minipc_Send_sIZE 64u // 53(整帧: 1 header + 50 payload + 2 CRC) + 余量
 
 #pragma pack(1)
 typedef enum
@@ -91,6 +91,13 @@ typedef struct
 		uint8_t match_progress;	   // B: 比赛进度
 		uint8_t occupation;		   // B: 占领状态
 		float bullet_speed;		   // f: 子弹速度
+		/* ---- 受击检测（见 application/armor_hit），追加在末尾以保证前面偏移不变 ---- */
+		uint8_t armor_id;			   // B: 最近一次受击的装甲板 ID (0=无)
+		uint8_t armor_reason;		   // B: HP_deduction_reason (0=弹丸,1=撞击,4=超射速…)
+		uint8_t armor_hit_cnt;		   // B: 累计受击次数
+		uint8_t armor_hit_seq;		   // B: 事件序号(每次新受击+1, 供小电脑去重)
+		float armor_angle_chassis;	   // f: 受击方向, 相对底盘正前方[度], 逆时针为正
+		float armor_angle_world;	   // f: 叠加 yaw 的场地方位[度], 0~360
 	} Vision;
 
 } __attribute__((packed)) Minipc_Send_s;

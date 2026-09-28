@@ -12,6 +12,7 @@
 #include "serial.h"
 #include "daemon.h"
 #include "bsp_log.h"
+#include "armor_hit.h" /* 受击检测：SendMinipcData() 里顺带刷新并填帧 */
 #include "tim.h"
 
 static Minipc_Recv_s minipc_recv_data;
@@ -119,6 +120,9 @@ void Minipc_Recover(void)
  */
 void SendMinipcData(Minipc_Send_s *send_data)
 {
+    /* 受击检测：顺带刷新 g_armor_hit 并填好本帧新增的受击字段（见 application/armor_hit） */
+    ArmorHitUpdate();
+
     // buff和txlen必须为static,才能保证在函数退出后不被释放,使得DMA正确完成发送
     // 析构后的陷阱需要特别注意!
     static uint16_t flag_register;
