@@ -56,6 +56,7 @@ public:
 
     void init(const Config& config);                 // 替代 DJIMotor_Register
     void setEnable(uint8_t motor_enable);            // 替代 DJIMotor_Set_Enable
+    void resetAngle();                               // 电机重上电后重新对齐累加角度(清零 angle_/速度状态, 重取编码器基点)
     void setAngle(float angle);                      // 替代 DJIMotor_Set_Angle（最短路径）
     void setAngleCircular(float angle);              // 替代 DJIMotor_Set_Angle_Circular（多圈）
     void setAngleIncrement(float angle_increment);   // 替代 DJIMotor_Set_Angle_Increment

@@ -309,7 +309,9 @@ static void BasicSet()
 
 static void GimbalRC()
 {
-    gimbal_cmd_recv.yaw -= 0.003f * (float)REMOTE_RC_RH();
+    /* yaw 摇杆灵敏度: 每拍增量 = coef * RH(±660), 本任务 200Hz
+     * 0.003 → ±396°/s(满杆); 现改为 0.0015 → ±198°/s。要再慢就继续调这个系数。 */
+    gimbal_cmd_recv.yaw -= 0.0015f * (float)REMOTE_RC_RH();
     gimbal_cmd_recv.pitch -= 0.00003f * (float)REMOTE_RC_RV();
     gimbal_cmd_recv.real_pitch = ((gimbal_feedback_data.gimbal_imu_data.euler[1]) - gimbal_feedback_data.init_location) / 57.39;
 }
@@ -389,7 +391,35 @@ static void ChassisRotateSet()
         }
         break;
         case CHASSIS_ROTATE: // 变速小陀螺
-            chassis_cmd_recv.wz = 4000 * chassis_cmd_recv.chassis_rotate_buff;
+        {
+            /* 速度随 offset_angle 呈正弦变化(周期 90°)：
+               yaw 正方向对准装甲板(offset = 0/90/180/270，即底盘四个面)时最快，板间最慢。
+               注意底盘速度环是纯 P(Kp=10, Ki=0)，直接喂正弦会跟不上、看着一顿一顿，
+               所以再叠一级一阶平滑(时间常数 ~70ms @200Hz)，并适当收浅调制深度。 */
+            const float ROTATE_WZ_MAX = 4000.0f;   // 对准装甲板时的 wz（整体提速）
+            const float ROTATE_WZ_MIN = 1500.0f;   // 板间最慢时的 wz
+            const float ROTATE_WZ_SLEW = 40000.0f; // wz 每秒最多变化多少(200Hz 每拍 200)
+
+            /* |cos(2θ)|：一圈两个正弦波(cos2θ)，把它的**波峰和波谷都算作最高速**，
+               于是 4 个极值点 = 四块装甲板(θ=0/90/180/270)，板之间(45/135/…)为最低速。
+               相比之前的 0.5+0.5cos(4θ)：最高速位置相同，但"最低速"是尖的、停留更短，
+               整体更多时间在高速段。 */
+            const float s = fabsf(cosf(2.0f * chassis_cmd_recv.offset_angle * DEGREE_2_RAD));
+            const float wz_target = (ROTATE_WZ_MIN + (ROTATE_WZ_MAX - ROTATE_WZ_MIN) * s) *
+                                    chassis_cmd_recv.chassis_rotate_buff;
+
+            /* 斜率限幅：把"每秒变化量"限住，正弦形状与快慢起伏保留(不像一阶滤波会把起伏磨平)，
+               只削掉突变/毛刺与换向时的硬跳。要更顺就把 SLEW 调小(如 25000)，想更跟手就调大。 */
+            static float wz_out = 0.0f;
+            const float step_max = ROTATE_WZ_SLEW * 0.005f; /* 5ms 控制周期 */
+            float dz = wz_target - wz_out;
+            if (dz > step_max)
+                dz = step_max;
+            else if (dz < -step_max)
+                dz = -step_max;
+            wz_out += dz;
+            chassis_cmd_recv.wz = wz_out;
+        }
         break;
         default:
             chassis_cmd_recv.wz = 0.0;
@@ -609,7 +639,7 @@ static void SentrySet()
 
 void Deathcheck()
 {
-    if (referee_data->robot_status.current_HP == 0) // 原 GameRobotState.current_HP
+    if (referee_data->robot_status.current_HP == 0) 
     {
         gimbal_cmd_recv.Death_reInit = 1;
     }
@@ -1038,7 +1068,13 @@ void RobotCMDTask()
 
     EnemyJudge();
     VisionSetMatchData();
-    SendMinipcData(NULL);                    // 视觉链路: 本仓 seasky 协议, 发模块那份(与 1kHz 路径同一份)
+    /* 视觉帧 100Hz 发送：本任务 200Hz → 2 分频（原来还额外有 1kHz 的 INS 路径，已去掉） */
+    static uint8_t vision_tx_cnt = 0;
+    if (++vision_tx_cnt >= 2)
+    {
+        vision_tx_cnt = 0;
+        SendMinipcData(NULL);                // 视觉链路: 本仓 seasky 协议, 发模块那份
+    }
 
     SendToUIData();
     VisionTraceSample();

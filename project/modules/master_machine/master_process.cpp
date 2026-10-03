@@ -135,6 +135,10 @@ void SendMinipcData(Minipc_Send_s *send_data)
         send_data = &minipc_send_data;
     }
 
+    /* 调试便利：把帧头写进结构体字段，这样 minipc_send_data.Vision.header 也能反映真实帧头。
+       （打包函数用的是硬写的 SEND_VISION_ID，并不读这个字段，所以不影响线上字节。） */
+    send_data->Vision.header = SEND_VISION_ID;
+
     // 填充IMU姿态数据
     if (minipc_ahrs != nullptr)
     {

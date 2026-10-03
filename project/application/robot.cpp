@@ -67,10 +67,8 @@ static void StartINSTASK(void *argument)
         iwdg_alive_ins = 1; // 心跳: 供 daemon 任务判定本任务是否卡死
         ins_start = DWT_GetTimeline_ms();
 
-        /* 视觉数据: 与原 robot_task.h 的 INS 任务一致, 每 1ms 发一帧。
-           发送数据只有一份(模块持有的那份), 与 200Hz 的 RobotCMDTask 共用 —— 所以
-           detect_color/姿态等每帧都是最新的, 不会出现"1kHz 那帧颜色一直是 0"的老问题。 */
-        SendMinipcData(NULL);
+        /* 视觉帧统一由 RobotCMDTask() 以 **100Hz** 发送（见 robot_cmd.cpp 的 2 分频），
+           这里(1kHz 的 INS 任务)不再发 —— 115200 链路本来也只跑得动 ~217 帧/s。 */
 
         ins_dt = DWT_GetTimeline_ms() - ins_start;
         if (ins_dt > 1)

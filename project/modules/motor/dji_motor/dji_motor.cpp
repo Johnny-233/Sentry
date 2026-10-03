@@ -60,6 +60,16 @@ void DJIMotor::decodeCallback(void* device)
     instance->motor_valid_ = 1;      // 收到反馈帧，标记电机通信有效
 }
 
+/* 电机掉电重上电后，编码器基点和软件累加角度都会错位：把累加角度与速度状态清零，
+   并以当前编码器值作为新基点（云台 yaw 的单圈角/底盘偏角用它，见 gimbal.cpp）。 */
+void DJIMotor::resetAngle()
+{
+    angle_ = 0.0f;
+    velocity_ = 0.0f;
+    velocity_raw_ = 0.0f;
+    ecd_last_ = feedback_raw_.ecd;
+}
+
 void DJIMotor::currentCommand()
 {
     int16_t current_cnt = DJIM_CURRENT_TO_CNT(motor_type_, target_current_);

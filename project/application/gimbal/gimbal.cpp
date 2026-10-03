@@ -56,14 +56,14 @@ static float yaw_ff_last_measure = 0.0f;   // 角度环前馈用：上一次角�
 
 /* 旧 C 配置一字不改（数值取自 application/gimbal/gimbal.c 的 controller_param_init_config） */
 static const PidPort kYawAnglePid = {
-    .Kp = 80,  // 30->40->80 增强跟踪响应
+    .Kp = 95,  // 110 时出现高频抖动 -> 回退一档(30->40->80->110->95)
     .Ki = 60,  // 20 -> 60：稳态跟随误差补足时间 1.7~2s -> 约 0.6s
-    .Kd = 6,   // 3->6 增加阻尼抑制震荡
+    .Kd = 9,   // 3->6->9 提高阻尼, 抑制高 Kp 带来的抖动
     .IntegralLimit = 250,  // 该输出经速度环(×约50)后相当于电流偏置, 250 -> 约 12500 计数
     .MaxOut = 330,
     .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
     .DeadBand = 0.1f,
-    .FF_Gain = 120.0f,     // 速度前馈(对角度环而言)：Output += FF_Gain * d(角度)/dt
+    .FF_Gain = 50.0f,      // 速度前馈(作用在**设定值差分**上)：等效 ~25% 超前(200=满超前)
 };
 static const PidPort kYawSpeedPid = {
     .Kp = 50,
@@ -298,8 +298,12 @@ static void YawControlUpdate(void)
      * 前馈：旧 controller.c 是 Output += FF_Gain*(Measure - Last_Measure)（反馈差分，无 dt），
      * 对方 PID 只有在 features 带 FeatureFeedforward 且外部先 setFeedforward(v) 时才加 v*feedforward_gain，
      * 所以这里自己算"本次反馈 - 上次反馈"，在 update() 之前喂进去（单位换算见 pid_port.h）。 */
-    yaw_angle_pid.setFeedforward(yaw_total - yaw_ff_last_measure);
-    yaw_ff_last_measure = yaw_total;
+    /* 前馈源改用**设定值差分**（不是反馈差分）：反馈差分在底盘快转/振动时噪声很大，
+       FF_Gain=120 会把它放大成"甩云台"——现象就是云台快转时被拽向底盘、世界角保不住。
+       设定值差分只反映摇杆/视觉下达的运动(等效"提前给出设定速率的 ~60%")，
+       既保留跟随超前，又完全不理会反馈噪声。 */
+    yaw_angle_pid.setFeedforward(gimbal_cmd_recv.yaw - yaw_ff_last_measure);
+    yaw_ff_last_measure = gimbal_cmd_recv.yaw;
     yaw_angle_pid.update(yaw_total);
 
     /* 速度环：设定值 = 角度环输出(期望角速度 deg/s) */
@@ -310,8 +314,46 @@ static void YawControlUpdate(void)
     yaw_motor.setCurrent(yaw_speed_pid.output_ / 25000.0f);
 }
 
+/* 电机掉电/失联恢复 + 裁判断电复活后的重新对齐：
+ *  - yaw(GM6020)：软件累加角度基点会错位 → resetAngle() 重新对齐（控制环用 IMU，不受影响）
+ *  - pitch(MI)：内部绝对基准重置、机械零位失效 → motor_init=0 并重做回零
+ *  - Death_reInit：裁判 HP==0 断电，复活(1→0 沿)时走同一套恢复流程 */
+static void GimbalRecoverCheck()
+{
+    static uint8_t yaw_lost = 0, pitch_lost = 0, death = 0;
+
+    if (!yaw_motor.motor_valid_)
+        yaw_lost = 1;
+    else if (yaw_lost)
+    {
+        yaw_lost = 0;
+        yaw_motor.resetAngle();
+        motor_init = 0; /* 让 motor_init==0 分支用当前 IMU 角度重设设定值, 避免阶跃 */
+    }
+
+    if (!pitch_motor.valid_)
+        pitch_lost = 1;
+    else if (pitch_lost)
+    {
+        pitch_lost = 0;
+        motor_init = 0;
+        PitchHomingRequest();
+    }
+
+    if (gimbal_cmd_recv.Death_reInit)
+        death = 1;
+    else if (death)
+    {
+        death = 0;
+        motor_init = 0;
+        PitchHomingRequest();
+    }
+}
+
 static void GimbalStateSet()
 {
+    GimbalRecoverCheck();
+
     switch (gimbal_cmd_recv.gimbal_mode)
     {
     // 停止
@@ -353,7 +395,7 @@ static void GimbalStateSet()
             yaw_speed_pid.resetIntegral();
             // 以当前角度初始化设定值,避免阶跃（原: yaw_motor->motor_controller.pid_ref = YawTotalAngle）
             yaw_angle_pid.setSetpoint(g_ahrs.output_.yaw_total);
-            yaw_ff_last_measure = g_ahrs.output_.yaw_total;  // 前馈差分基准同步重置, 避免首拍阶跃
+            yaw_ff_last_measure = gimbal_cmd_recv.yaw;  // 前馈基准: 与"设定值差分"前馈源保持一致
             gimbal_feedback_data.init_location = g_ahrs.output_.euler[1];  // 原 gimbal_IMU_data->Pitch
             motor_init = 1;
         }

@@ -124,7 +124,8 @@ void get_protocol_send_Vision_data(uint16_t send_id,       // 信号id
  *    若确实收不到数据: 优先让 PC 端对齐(整帧小端 CRC16), 实在不行再把这里改回 0 先跑通。
  * 说明: CRC 覆盖"本次实际收到的整帧"(len 字节) —— 因为小电脑真实帧长可能是 27 也可能更长,
  *       写死 27 会误判。 */
-#define VISION_RX_STRICT_CHECK 1
+#define VISION_RX_STRICT_CHECK 0 /* 0 = 只判首字节(原行为)：现场小电脑的 CRC 约定与本文件不一致，
+                                    开启后每帧都被丢弃导致收不到数据；先恢复通信，待与 PC 端对齐后再改回 1 */
 
 void get_protocol_info_vision(uint8_t *rx_buf,
                               uint16_t len,
