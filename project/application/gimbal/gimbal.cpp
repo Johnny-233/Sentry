@@ -320,15 +320,25 @@ static void YawControlUpdate(void)
  *  - Death_reInit：裁判 HP==0 断电，复活(1→0 沿)时走同一套恢复流程 */
 static void GimbalRecoverCheck()
 {
-    static uint8_t yaw_lost = 0, pitch_lost = 0, death = 0;
+    static uint8_t yaw_lost = 0, pitch_lost = 0, death = 0, yaw_seen = 0;
 
+    /* ⚠不能在这里 resetAngle() 清零 yaw 累加角度：上电头几拍 motor_valid_ 还是 0（反馈帧没到），
+       会被误判成"掉线→恢复"，一上电就把角度清零 → offset_angle/底盘偏角整体错位，
+       现象就是"重新上电后四个就近跟随方向错、摇杆移动方向与实际不符"。
+       所以：(a) 只有"曾经有效过"才允许判掉线；(b) 恢复时只重设设定值，不重建角度基准。 */
     if (!yaw_motor.motor_valid_)
-        yaw_lost = 1;
-    else if (yaw_lost)
     {
-        yaw_lost = 0;
-        yaw_motor.resetAngle();
-        motor_init = 0; /* 让 motor_init==0 分支用当前 IMU 角度重设设定值, 避免阶跃 */
+        if (yaw_seen)
+            yaw_lost = 1;
+    }
+    else
+    {
+        yaw_seen = 1;
+        if (yaw_lost)
+        {
+            yaw_lost = 0;
+            motor_init = 0; /* 让 motor_init==0 分支用当前 IMU 角度重设设定值, 避免阶跃 */
+        }
     }
 
     if (!pitch_motor.valid_)
