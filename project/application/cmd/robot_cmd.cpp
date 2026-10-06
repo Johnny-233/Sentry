@@ -1,27 +1,15 @@
 /**
  * @file    robot_cmd.cpp
  * @brief   机器人核心控制任务(RobotCMDInit / RobotCMDTask)
- * @note    由 application/cmd/robot_cmd.c 移植(836 行 C → C++), 控制逻辑/判据/数值逐行保留。
- *
- * 与旧 C 版的机制差异(都是"底层换对方框架"导致的, 逐条列出便于对照):
- *   1. message_center 全部删除: 原 PubRegister/SubRegister/SubGetMessage/PubPushMessage 去掉,
- *      cmd 直接读写全局实例 chassis_cmd_recv/gimbal_cmd_recv/shoot_cmd_recv(定义在本文件);
- *      底盘/云台/发射的反馈直接读 chassis/gimbal/shoot .cpp 里的全局实例(规约 §1.5)。
- *   2. 底层接口:
- *      RemoteControlInit(&huart3)   → Remote_Init(&huart3)  + remote.h 的 REMOTE_RC_* 宏;
- *      minipcInit(&huart1)          → Minipc_Init(&huart1);
- *      UITaskInit(&huart6,&ui_data) → Referee_Init(&huart6) + application/ui/ui.h 的 ui_data。
- *   3. 姿态: INS_Init()/INS_Task()/attitude_t → 全局 AHRS g_ahrs(本文件定义, robot_cmd.h 里 extern);
- *      字段映射(规约 §2): YawTotalAngle→output_.yaw_total, Pitch→euler[1], Yaw→euler[2],
- *                        Gyro[i]→gyro_b[i], Accel[i]→accel_b[i]。
- *   4. 视觉链路用回本仓原本的 seasky 协议(project/modules/master_machine):
- *      minipcInit(&huart1) → Minipc_Init(&huart1, &g_ahrs); 接收帧类型是 Minipc_Recv_s
- *      (字段在 .Vision 下); 本任务结尾照原样 EnemyJudge() + SendMinipcData(...),
- *      另外 INS 任务每 1ms 还会 SendMinipcData(NULL)。
- *      **发送数据只有一份**(模块持有的那份, 用 Minipc_GetSendData() 取): 原实现里
- *      robot_cmd 自带一份、模块内部另有一份, 1kHz 那条路径发出去的那份 detect_color
- *      从来没被填过(一直是 0=红)。现在两条路径共用同一份, 每帧都带正确颜色。
- *   5. 蜂鸣器/IWDG 本次不做; 原 robot_cmd.c 里也没有这两者的调用(见 PORT_MAPPING §5)。
+ * @note    由旧 C 版(836 行)逐行移植, 控制逻辑/判据/数值全部保留。与旧版的机制差异:
+ *   1. message_center 全删: cmd 直接读写全局实例(本文件三个 cmd 结构 + 各应用 .cpp 的反馈);
+ *   2. 底层接口: Remote_Init(&huart3) / Minipc_Init(&huart1) / Referee_Init(&huart6) + ui.h 的 ui_data;
+ *   3. 姿态: INS_Init()/attitude_t → 全局 AHRS g_ahrs(本文件定义);
+ *      字段映射 YawTotalAngle→yaw_total, Pitch→euler[1], Yaw→euler[2], Gyro[i]→gyro_b[i];
+ *   4. 视觉: 用回本仓 seasky 协议(project/modules/master_machine), 帧类型 Minipc_Recv_s(字段在 .Vision 下);
+ *      **发送数据只有一份**(模块持有, 用 Minipc_GetSendData() 取) —— 1kHz 与 200Hz 两条路径共用同一份,
+ *      否则 1kHz 那条发出去的 detect_color 永远是 0(红);
+ *   5. 蜂鸣器/IWDG 本次不做(原 robot_cmd.c 里也没有这两者的调用)。
  */
 // app
 #include "robot_def.h"
@@ -103,14 +91,12 @@
 #endif
 
 /* ============ cmd 的三个控制实例(定义在此, extern 声明见 robot_cmd.h) ============
- * 原类型名: 旧版叫 chassis_cmd_send/gimbal_cmd_send/shoot_cmd_send 并通过 message_center 发布;
- * 现在就是 chassis/gimbal/shoot 直接读的全局实例。 */
+ * chassis/gimbal/shoot 直接读这三个实例(旧版经 message_center 发布)。 */
 Chassis_Ctrl_Cmd_s chassis_cmd_recv;
 Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 Shoot_Ctrl_Cmd_s shoot_cmd_recv;
 
-/* ============ 全局姿态实例(定义在此, extern 声明见 robot_cmd.h) ============
- * 替代旧版 cmd 持有的 attitude_t*(INS_Init() 返回值), GimbalInit()/robot.cpp 直接读。 */
+/* ============ 全局姿态实例(定义在此, extern 声明见 robot_cmd.h) ============ */
 AHRS g_ahrs;
 
 /* cmd应用包含的模块实例指针和交互信息存储 */
@@ -193,19 +179,14 @@ void RobotCMDInit()
        控制指令改为直接读写上面三个全局实例, 反馈读各应用 .cpp 里的全局实例。 */
     gimbal_cmd_recv.pitch = 0;
 
-    // 底盘跟随模式PID初始化
     chassis_follow_pid.init(pidPort(kChassisFollowPid, PID_SCALE_COUNTS, 5));
 }
 
-/**
- * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
- *        单圈绝对角度的范围是0~360,说明文档中有图示
- *
- */
+/* 计算"当前 yaw 电机单圈角度"与机械零位(YAW_CHASSIS_ALIGN_ECD)的夹角 → offset_angle。
+ * 单圈绝对角度范围 0~360(说明文档中有图示); 它也是 offset_angle 唯一的跨系作用: 云台系 → 底盘系 */
 static void CalcOffsetAngle()
 {
     gimbal_feedback_data.offset_diff = gimbal_feedback_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
-    // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
     static float angle;
     angle = gimbal_feedback_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
 #if YAW_ECD_GREATER_THAN_4096                               // 如果大于180度
@@ -237,10 +218,7 @@ static void GimbalPitchLimit()
         gimbal_cmd_recv.pitch = gimbal_cmd_recv.pitch;
 }
 
-/**
- * @brief 判断视觉有没有发信息
- *
- */
+/* 判断视觉是否在发目标: yaw/pitch 同时为 0 持续 1s 判定丢目标; can_fire 决定本拍是否允许开火 */
 static void VisionJudge()
 {
     static float target_lost_time = 0.0f;
@@ -290,7 +268,7 @@ static void BasicSet()
     static uint8_t pitch_cmd_inited = 0;
     if (!pitch_cmd_inited)
     {
-        MIMotor *pm = GetPitchMotor(); // 原 MIMotorInstance*
+        MIMotor *pm = GetPitchMotor();
         if (pm != NULL && pm->angle_ != 0.0f)
         {
             gimbal_cmd_recv.pitch = pm->angle_;
@@ -300,19 +278,33 @@ static void BasicSet()
 
     GimbalPitchLimit();
     VisionJudge();
-    //发射基本模式设定
     shoot_cmd_recv.shoot_mode = SHOOT_ON;
     shoot_cmd_recv.friction_mode = FRICTION_ON;
     shoot_cmd_recv.shoot_rate = 8;
-    chassis_cmd_recv.power_limit = referee_data->robot_status.chassis_power_limit; // 原 GameRobotState.chassis_power_limit
+    chassis_cmd_recv.power_limit = referee_data->robot_status.chassis_power_limit;
+}
+
+/* 摇杆死区 + 线性重映射：回中时读数通常不是正好 1024（常见偏差 ±5~15 计数），
+   而 yaw/pitch 是**增量式**指令，这点偏差会被持续积分 → 无人操作时云台缓慢自转、底盘跟随跟着转。
+   死区内当 0；死区外按比例拉伸，保证满杆量级仍是 ±660 不变。 */
+#define RC_STICK_DEADZONE 25
+static float RCStickDeadzone(int16_t v)
+{
+    const float dz = (float)RC_STICK_DEADZONE;
+    const float f = (float)v;
+    if (f > dz)
+        return (f - dz) * 660.0f / (660.0f - dz);
+    if (f < -dz)
+        return (f + dz) * 660.0f / (660.0f - dz);
+    return 0.0f;
 }
 
 static void GimbalRC()
 {
     /* yaw 摇杆灵敏度: 每拍增量 = coef * RH(±660), 本任务 200Hz
      * 0.003 → ±396°/s(满杆); 现改为 0.0015 → ±198°/s。要再慢就继续调这个系数。 */
-    gimbal_cmd_recv.yaw -= 0.0015f * (float)REMOTE_RC_RH();
-    gimbal_cmd_recv.pitch -= 0.00003f * (float)REMOTE_RC_RV();
+    gimbal_cmd_recv.yaw -= 0.0015f * RCStickDeadzone((int16_t)REMOTE_RC_RH());
+    gimbal_cmd_recv.pitch -= 0.00003f * RCStickDeadzone((int16_t)REMOTE_RC_RV());
     gimbal_cmd_recv.real_pitch = ((gimbal_feedback_data.gimbal_imu_data.euler[1]) - gimbal_feedback_data.init_location) / 57.39;
 }
 
@@ -340,13 +332,11 @@ void FoundEnermy()
 
         if (fabsf(raw_err) > 0.3f)
         {
-            // 根据误差变化量自适应选择滤波强度
             float err_delta = raw_err - err_last;
             float alpha;
 
-            // 误差估计的滤波强度(τ = 5ms/alpha)。
-            // 注意: 0.0012 增益 + 0.7/0.5/0.4 的组合会在实车上引起 pitch 震荡(相位裕度不足),
-            // 已回退到原值。要提高跟踪速度必须同时加大阻尼(MI 电机 kd), 见 CODE_REVIEW.md 调参记录。
+            // 误差估计的滤波强度(τ = 5ms/alpha)。注意: 加大增益+加快滤波会在实车上引起 pitch 震荡
+            // (相位裕度不足), 已回退原值; 要提高跟踪速度必须同时加大 MI 电机 kd, 见 CODE_REVIEW.md。
             if (fabsf(err_delta) > 0.5f)
                 alpha = 0.3f;    // 大跳变: 快速跟上
             else if (fabsf(err_delta) > 0.05f)
@@ -365,20 +355,21 @@ void FoundEnermy()
             err_last = 0;
         }
     }
-    /* |误差| ≤ 0.5°: 死区锁死 */
 }
 
 static void ChassisRotateSet()
 {
-    // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode)
     {
         //底盘跟随模式,将offset_angle量化到最近的90°作为目标(4个正方向)
         case CHASSIS_FOLLOW_GIMBAL_YAW:
         {
-            float raw = chassis_cmd_recv.offset_angle;
+            /* offset_angle 有零点几度量化/抖动噪声，先低通再进跟随环：否则噪声偶尔冲出
+               死区就给底盘一脚（现象：静止时偶发轻微抖动）。α=0.15 @200Hz ≈ 33ms，不影响跟随。 */
+            static float offset_filt = 0.0f;
+            offset_filt += 0.15f * (chassis_cmd_recv.offset_angle - offset_filt);
+            float raw = offset_filt;
             float snapped;
-            // 就近量化到90°的倍数 —— 4个固定正方向: 0°, ±90°, 180°/-180°
             if (raw >= 0.0f)
                 snapped = (float)((int)(raw / 90.0f + 0.5f)) * 90.0f;
             else
@@ -386,8 +377,22 @@ static void ChassisRotateSet()
             /* 原: chassis_cmd_send.wz = PIDCalculate(&chassis_follow_pid, raw, snapped);
                (measure=raw, ref=snapped); 对方 PID 需要显式 setSetpoint + update */
             chassis_follow_pid.setSetpoint(snapped);
-            chassis_follow_pid.update(raw);
-            chassis_cmd_recv.wz = chassis_follow_pid.output_;
+            /* 误差死区 2°：对齐后不只把输出置 0，还要**清掉跟随环积分**，并把误差喂 0 让 PID
+               状态停住 —— 否则 PID 会在死区内继续累积 offset_angle 那零点几度噪声，出死区时给一脚
+               （这就是加了 1° 死区后仍然残留的轻微抖动）。 */
+            if (fabsf(snapped - raw) < 2.0f)
+            {
+                chassis_follow_pid.resetIntegral();
+                chassis_follow_pid.setSetpoint(snapped);
+                chassis_follow_pid.update(snapped); /* 测量=设定 → 误差 0, 状态不再发散 */
+                chassis_cmd_recv.wz = 0.0f;
+            }
+            else
+            {
+                chassis_follow_pid.setSetpoint(snapped);
+                chassis_follow_pid.update(raw);
+                chassis_cmd_recv.wz = chassis_follow_pid.output_;
+            }
         }
         break;
         case CHASSIS_ROTATE: // 变速小陀螺
@@ -434,7 +439,7 @@ static void ChassisRC()
 
     if (RC_SWITCH_LEFT() == RC_SW_VALUE_DOWN)
     {
-        chassis_cmd_recv.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+        chassis_cmd_recv.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW; // N 档默认：底盘跟随云台
     }
     else if (RC_SWITCH_LEFT() == RC_SW_VALUE_MID)
     {
@@ -479,10 +484,7 @@ static void ShootRC()
     }
 }
 
-/**
- * @brief 控制输入为遥控器(调试时)的模式和控制量设置
- *
- */
+/* 遥控器(摇杆)输入时的模式与控制量设置 */
 static void RemoteControlSet()
 {
     ChassisRC();
@@ -495,7 +497,7 @@ static void GetGimbalInitImu()
 {
     if (mid_round_patrol.flag == 0)
     {
-        mid_round_patrol.yaw_init = gimbal_feedback_data.gimbal_imu_data.euler[2]; // 原 .Yaw
+        mid_round_patrol.yaw_init = gimbal_feedback_data.gimbal_imu_data.euler[2];
         mid_round_patrol.yaw = mid_round_patrol.yaw_init;
         mid_round_patrol.flag = 1;
     }
@@ -505,7 +507,7 @@ static void RoundPatrol()
 {
     if (round_patrol.flag == 0)
     {
-        round_patrol.init_totol_round = gimbal_feedback_data.gimbal_imu_data.yaw_total / 360.0f; // 原 .YawTotalAngle
+        round_patrol.init_totol_round = gimbal_feedback_data.gimbal_imu_data.yaw_total / 360.0f;
         round_patrol.flag = 1;
     }
     round_patrol.total_round = (gimbal_feedback_data.gimbal_imu_data.yaw_total / 360.0f) - round_patrol.init_totol_round;
@@ -516,7 +518,7 @@ static void MidRoundPatrol()
 {
     if (mid_round_patrol.flag == 0)
     {
-        mid_round_patrol.yaw_init = gimbal_feedback_data.gimbal_imu_data.euler[2]; // 原 .Yaw
+        mid_round_patrol.yaw_init = gimbal_feedback_data.gimbal_imu_data.euler[2];
         mid_round_patrol.yaw = mid_round_patrol.yaw_init;
         mid_round_patrol.flag = 1;
     }
@@ -583,7 +585,7 @@ static void ShootAC()
 
 static void Sentry_GimbalAC()
 {
-    static MIMotor *PP_Motor; // 原 MIMotorInstance*
+    static MIMotor *PP_Motor;
     PP_Motor = GetPitchMotor();
     static float PIT;
     GetGimbalInitImu();
@@ -708,7 +710,7 @@ static void KeyControl()
     chassis_cmd_recv.vy = (key_d * 20000.0f - key_a * 20000.0f) * chassis_speed_buff;
 
     ChassisRotateSet();
-    switch (referee_data->robot_status.robot_level) // 原 GameRobotState.robot_level
+    switch (referee_data->robot_status.robot_level)
     {
     case 1:
         chassis_rotate_buff = 1;
@@ -800,10 +802,7 @@ static void KeyControl()
     }
 }
 
-/**
- * @brief 输入为键鼠时模式和控制量设置
- *
- */
+/* 键鼠输入时的模式与控制量设置 */
 static void MouseKeySet()
 {
     MouseControl();
@@ -811,9 +810,6 @@ static void MouseKeySet()
 }
 #endif // REMOTE_DEVICE_VT13
 
-/**
- * @brief 停止
- */
 static void AnythingStop()
 {
     gimbal_cmd_recv.gimbal_mode = GIMBAL_ZERO_FORCE;
@@ -826,17 +822,12 @@ static void AnythingStop()
     {
         MIMotor *pm = GetPitchMotor();
         if (pm != NULL)
-            gimbal_cmd_recv.pitch = pm->angle_; // 原 pm->measure.angle (rad)
+            gimbal_cmd_recv.pitch = pm->angle_; // rad
     }
     DataLebel.ACEntryPoint = 1;
-    //重置与小电脑通信失败的标志位
     DataLebel.cmd_error_flag = 0;
 }
 
-/**
- * @brief 控制量及模式设置
- *
- */
 static void ControlDataDeal()
 {
     if (RC_SWITCH_RIGHT() == RC_SW_VALUE_MID)
@@ -900,10 +891,10 @@ static void GimbalCmdReinitOnModeEntry(void)
 
     if (gimbal_cmd_recv.gimbal_mode == GIMBAL_GYRO_MODE && last_mode != GIMBAL_GYRO_MODE)
     {
-        gimbal_cmd_recv.yaw = gimbal_feedback_data.gimbal_imu_data.yaw_total; // 以当前 IMU 偏航角为起点(原 .YawTotalAngle)
+        gimbal_cmd_recv.yaw = gimbal_feedback_data.gimbal_imu_data.yaw_total; // 以当前 IMU 偏航角为起点
         MIMotor *pm = GetPitchMotor();
         if (pm != NULL)
-            gimbal_cmd_recv.pitch = pm->angle_; // pitch 以当前电机角度为起点(原 pm->measure.angle)
+            gimbal_cmd_recv.pitch = pm->angle_; // pitch 以当前电机角度为起点
         GimbalAlgorithmReset();
         DataLebel.ACEntryPoint = 1; // 自动模式用平滑进入
         LOG_INFO(LOG_MOD_SM, "cmd", "[cmd] gimbal re-enabled: yaw cmd reset to %.1f, pitch cmd=%.3f\r\n",
@@ -1019,15 +1010,15 @@ static void VisionTraceSample(void)
         return;
     }
 
-    MIMotor *pm = GetPitchMotor(); // 原 MIMotorInstance*
-    DJIMotor *ym = GetYawMotor();  // 原 DJIMotorInstance*
+    MIMotor *pm = GetPitchMotor();
+    DJIMotor *ym = GetYawMotor();
     vt_sample_t *s = &vt_buf[g_vt_head % VT_LEN];
 
     /* 视觉帧计数: 用本仓 seasky 模块的 g_vision_frame_cnt(每次成功解帧 +1), 与原实现一致 */
     s->frame_cnt = g_vision_frame_cnt;
     s->cmd_yaw = gimbal_cmd_recv.yaw;
-    s->yaw_imu = gimbal_feedback_data.gimbal_imu_data.yaw_total;    // 原 .YawTotalAngle
-    s->gyro_z = gimbal_feedback_data.gimbal_imu_data.gyro_b[2];     // 原 .Gyro[2]
+    s->yaw_imu = gimbal_feedback_data.gimbal_imu_data.yaw_total;
+    s->gyro_z = gimbal_feedback_data.gimbal_imu_data.gyro_b[2];
     s->vis_err = minipc_recv_data->Vision.yaw;
     /* TODO(移植): yaw 的角度/速度环按规约 §6 已移到应用层(gimbal.cpp), 对方 DJIMotor 的 PID 又是
        私有成员, 这里取不到 angle_PID/speed_PID 的 Output; 需要时由 gimbal.cpp 暴露只读接口。 */
@@ -1036,10 +1027,10 @@ static void VisionTraceSample(void)
     s->can_fire = (uint16_t)minipc_recv_data->Vision.can_fire;
     s->pitch_cmd = gimbal_cmd_recv.pitch;
     s->pitch_motor = (pm != NULL) ? pm->angle_ : 0.0f;
-    s->pitch_imu = gimbal_feedback_data.gimbal_imu_data.euler[1] * DEGREE_2_RAD; // 原 .Pitch
+    s->pitch_imu = gimbal_feedback_data.gimbal_imu_data.euler[1] * DEGREE_2_RAD;
     /* TODO(移植): 对方 DJIMotor 只有 angle_(deg)/velocity_(deg/s), 没有 total_angle;
        yaw_motor_angle 用 angle_ 顶替(单圈/累计语义不同, 分析时注意)。 */
-    s->yaw_motor_speed = ym->velocity_; // 原 ym->measure.speed_aps
+    s->yaw_motor_speed = ym->velocity_;
     s->yaw_motor_angle = ym->angle_;
     g_vt_head++;
 

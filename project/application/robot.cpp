@@ -1,22 +1,8 @@
 /**
  * @file    robot.cpp
  * @brief   整车入口与任务划分
- * @note    由 application/robot.c + application/robot_task.h 移植（C → C++）。
- *
- * 与原 C 版的差异（都是"底层换成对方框架"导致的，逐条列在这里方便对照）：
- *   1. BSPInit() 里的 DWT_Init(168)/BSPLogInit() → 对方的 DWT_Init()/BSP_LogInit()；
- *      BuzzerInit() 对方框架没有 → 不做（TODO）。
- *   2. 多了 DJIMotor::timbaseSelect(&htim5)：对方的电机模块把速度/位置环跑在 htim5 中断里，
- *      必须在所有电机 init 之后调用一次（对应原来 motor_task.c 的 1kHz 控制循环）。
- *   3. 原 MOTOR 任务里的 MotorControlTask() 已由上面那条接管，本任务只保留心跳与超时打印。
- *   4. 原 INS 任务里的 INS_Init()/INS_Task() → g_ahrs.init()（在 RobotCMDInit 里）+ g_ahrs.start()
- *      （对方 AHRS 自带解算任务）；本任务只保留 1kHz 发视觉数据与心跳。
- *      视觉链路用回本仓原本的 seasky 协议（`project/modules/master_machine/`），
- *      发送就是原 `SendMinipcData(NULL)`，与 `robot_task.h` 的 INS 任务完全一致。
- *   5. MOTOR 任务里补回了原 `motor_task.c` 的 MI 电机周期重发：`if(cnt%10==0) MiMotorControl();`。
- *   5. 原 DaemonTask() 是全局 daemon 链表的轮询；对方框架每个模块自带 Daemon 实例（挂在 TIM 上），
- *      所以本任务不再轮询，只做"控制任务卡死检测"打印。
- *   6. IWDG 暂不做（对方框架没有 IWDG 模块）：原来卡死会硬件复位，现在只打印。
+ * @note    C → C++ 移植差异见根目录 MIGRATION_NOTES.md;
+ *          视觉链路用本仓的 seasky 协议(project/modules/master_machine/)。
  */
 #include "robot.h"
 #include "robot_def.h"
@@ -40,7 +26,7 @@
 #include "cmsis_os.h"
 #include "tim.h"
 
-/* ---- 看门狗心跳(原 robot_task.h 的静态变量, 见上方差异 6) ---- */
+/* ---- 心跳标志: 只给 daemon 做卡死检测打印, 不喂硬件 IWDG ---- */
 static volatile uint8_t iwdg_alive_ins = 0;
 static volatile uint8_t iwdg_alive_motor = 0;
 static volatile uint8_t iwdg_alive_robot = 0;
@@ -54,8 +40,7 @@ static osThreadId_t uiTaskHandle;
 
 /* ============================================================================
  *  INS 任务: 1kHz
- *  原版: INS_Init(); 循环 { INS_Task(); SendMinipcData(NULL); osDelay(1); }
- *  现版: 姿态解算在 g_ahrs 自己的任务里, 本任务只负责每 1ms 把视觉数据发出去
+ *  姿态解算在 g_ahrs 自己的任务里, 本任务只负责心跳(视觉帧由 RobotCMDTask 发, 见下)
  * ==========================================================================*/
 static void StartINSTASK(void *argument)
 {
@@ -79,7 +64,7 @@ static void StartINSTASK(void *argument)
 
 /* ============================================================================
  *  MOTOR 任务: 1kHz
- *  电机闭环已由 DJIMotor 的 htim5 中断接管, 这里只保留心跳与超时打印
+ *  电机环不再是独立任务: 由 DJIMotor 静态实例承担(5 分频 200Hz, 见下), 这里只保留心跳与超时打印
  * ==========================================================================*/
 /* 调试用：MOTOR 任务实际周期(DWT 周期数，168MHz 下 1ms=168000)，确认 1kHz 没被别的任务饿死 */
 volatile uint32_t g_motor_task_dcyc = 0;
@@ -152,10 +137,8 @@ static void StartDAEMONTASK(void *argument)
 
 #if defined(SENTRY_APP_LAYER) || 1
         /* ---- 链路自愈(每 500ms 一次) ----
-         * HAL 的 UART DMA 接收有概率死锁(DMA 不再搬数据, SR 里 RXNE 挂着, HAL 仍报 BUSY):
-         * 一旦发生, 遥控/视觉的帧就冻结在最后一帧, 车不再响应。对方框架的 Daemon 只在
-         * "掉线那一刻"回调一次, 救不回来(而且它自己也可能卡在 HAL_BUSY), 所以这里周期性
-         * 重开一次串口接收 —— 与旧 C 固件在每个离线回调里调 USARTServiceInit 的兜底同一目的。 */
+         * HAL 的 UART DMA 接收有概率死锁(DMA 不再搬数据, HAL 仍报 BUSY): 帧冻结在最后一帧,
+         * 车不再响应。框架的 Daemon 只在掉线那一刻回调一次, 救不回来 → 周期性重开串口接收。 */
         {
             static uint8_t recover_cnt = 0;
             if (++recover_cnt >= 50)
@@ -172,10 +155,9 @@ static void StartDAEMONTASK(void *argument)
         if (daemon_dt > 10)
             LOG_ERR(LOG_MOD_SYS, "daemon", "[freeRTOS] Daemon Task is being DELAY! dt = [%d]\r\n", (int)daemon_dt);
 
-        /* 控制任务卡死检测(原来喂 IWDG, 见文件头差异 6) */
+        /* 控制任务卡死检测(原固件喂 IWDG, 卡死会硬件复位; 现在只打印) */
         if (iwdg_alive_ins && iwdg_alive_motor && iwdg_alive_robot)
         {
-            /* 三个控制任务都推进过 */
         }
         else
         {
@@ -231,9 +213,7 @@ static void StartUITASK(void *argument)
 }
 
 /* ============================================================================
- *  构造 InitStructure 并创建任务(原 OSTaskInit)
- *  注意: osThreadAttr_t.stack_size 单位是**字节**, 原 osThreadDef 的第 5 个参数是**字**,
- *        所以这里都乘 4。
+ *  创建各任务。注意: osThreadAttr_t.stack_size 单位是**字节**, 所以下面都乘 4
  * ==========================================================================*/
 static void OSTaskInit()
 {
@@ -270,15 +250,8 @@ static void OSTaskInit()
  * ==========================================================================*/
 void Robot_Init(void)
 {
-    /* 原 C 版这里用 __disable_irq() / __enable_irq() 把初始化整个包起来，原因是
-     * "初始化过程中不要被中断打断"。**本移植版必须去掉它**，因为对方框架的
-     * `AHRS::init()` 内部会 `preheat()`：它用 `HAL_GetTick()` + `HAL_Delay()` 等 IMU 升温，
-     * 而 HAL 时基是 TIM14 中断（见 Src/stm32f4xx_hal_timebase_tim.c）——
-     * 关着中断调它就是死循环（tick 永远不涨，预热永不超时），开机直接卡死。
-     * 原 C 版能在关中断的情况下初始化，是因为它的 `INS_Init()` 是在 INS 任务里调的
-     * （见 application/robot_task.h 的 StartINSTASK），预热也在任务里跑；移植后 IMU 初始化
-     * 提前到了这里（对方框架的 `AHRS::init()` 自带预热+校准+启动）。
-     * 对方的 Robot_Init 也是全程开中断的。 */
+    /* 这里必须开中断: AHRS::init() 会用 HAL_GetTick()/HAL_Delay() 预热 IMU, 而 HAL 时基是
+     * TIM14 中断, 关着中断调它 tick 永不增长 → 预热死循环, 开机直接卡死。 */
     __enable_irq();
 
     DWT_Init();

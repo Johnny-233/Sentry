@@ -1,8 +1,7 @@
 #ifndef ROBOT_H
 #define ROBOT_H
 
-/* Robot 利用 robot_def.h 中的宏对不同的机器人进行了大量的兼容, 同时兼容了两个开发板(云台板和底盘板)的配置。
- * C → C++ 移植: 保持 extern "C" 入口, 供 Src/freertos.c 调用 */
+/* 保持 extern "C" 入口, 供 Src/freertos.c 调用 */
 
 #ifdef __cplusplus
 extern "C" {

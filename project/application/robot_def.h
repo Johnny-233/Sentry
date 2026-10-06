@@ -3,18 +3,11 @@
 #define ROBOT_DEF_H
 
 /* ============================================================================
- * application 层公共类型定义（C → C++ 移植）
- *
- * 与原 C 版 application/robot_def.h 的差异（都是"接口改对方的"导致的）：
- *   1. 姿态来源：原来的 attitude_t（Modules/imu/ins_task.h）→ 对方的 AHRS::Output；
- *      两者都是**角度制(deg)**，YawTotalAngle ↔ output_.yaw_total 语义一致。
- *   2. 敌我颜色：原来的 Enemy_Color_e（Modules/master_machine/master_process.h）
- *      → uint8_t，取值同裁判系统 id.robot_color（0=红 1=蓝）。
- *   3. 不再 include message_center.h / ins_task.h / master_process.h。
- * 其余枚举、结构体、字段与原版**逐字段一致**，控制逻辑不变。
+ * application 层公共类型定义。字段与旧 C 版逐字段一致, 控制逻辑不变。
+ * 姿态源是 AHRS::Output(**角度制 deg**); 敌我颜色是 uint8_t(0=红 1=蓝, 同裁判系统 id.robot_color)。
  * ==========================================================================*/
 
-#include "ahrs.h"          /* 对方的姿态模块（原 ins_task） */
+#include "ahrs.h"          /* 姿态模块 */
 #include <stdint.h>
 
 /* 常用数学常量：值与原 Modules/general_def.h **完全一致**，
@@ -48,11 +41,9 @@
 #define YAW_CHASSIS_ALIGN_ECD 5857  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
 #define YAW_ECD_GREATER_THAN_4096 1 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 3412      // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-/* pitch 软限位(rad, "上电回零坐标系": 零点 = 上电回零时确定的机械下限)
- * 为什么用这个坐标系: MI 电机上报角度的绝对基准每次上电都不同(实测数值不一致),
- * 所以 gimbal.cpp 里实现了上电回零(homing): 首次进入云台模式时缓慢往下找机械下限并在那里设零。
- * 因此下面的数值是相对"机械下限"的: 实测行程 0.910 rad = 52.1 度, 向上为负方向,
- * 两端各留约 0.05 rad(2.7 度)余量 => 下限侧 -0.02, 上限侧 -0.86。 */
+/* pitch 软限位(rad, "上电回零坐标系": 零点 = 上电回零时确定的机械下限)。
+ * 为什么用这个坐标系: MI 电机上报角度的绝对基准每次上电都不同, 所以 gimbal.cpp 做了上电回零。
+ * 数值相对该零点: 实测行程 0.910 rad(向上为负方向), 两端各留约 0.05 rad 余量。 */
 #define PITCH_MAX_ANGLE -0.02         // 机械下限侧(刚离开限位一点, 避免顶死)
 #define PITCH_MIN_ANGLE -0.86         // 机械上限侧(行程 0.91 - 余量)
 // 发射参数
@@ -70,7 +61,6 @@
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮周长(速度计算用)
 
 #pragma pack(1) // 压缩结构体,取消字节对齐,下面的数据都可能被传输
-/* -------------------------基本控制模式和数据类型定义-------------------------*/
 // 机器人状态
 typedef enum
 {
@@ -138,9 +128,7 @@ typedef struct
     float chassis_power_mx;
 } Chassis_Power_Data_s;
 
-/**
- * @brief 中场巡航控制参数
- */
+/* 中场巡航控制参数 */
 typedef struct {
     uint8_t flag;               // 巡航启用标志
     float yaw_init;             // 巡航起始角度
@@ -150,9 +138,7 @@ typedef struct {
     uint8_t Power_Out;          // 掉线保护标志
 } cal_mid_round_patrol_t;
 
-/**
- * @brief 全场巡航控制参数
- */
+/* 全场巡航控制参数 */
 typedef struct {
     int32_t init_totol_round;   // 初始全场圈数
     int32_t total_round;        // 当前总巡航圈数
@@ -160,7 +146,7 @@ typedef struct {
     float yaw_init;             // 起始基准角度
 } cal_round_patrol_t;
 
-/* ----------------用于记录时间或标志位的结构体---------------- */
+/* 时间/标志位记录 */
 typedef struct
 {
     float t_shoot;
@@ -175,7 +161,7 @@ typedef struct
     uint8_t ACEntryPoint; // 自动控制入口点
 } DataLebel_t;
 
-/* ----------------CMD 应用的控制数据（原由 message_center 发布/订阅, 现改为直接访问）---------------- */
+/* CMD 应用的控制数据(直接访问全局实例, 不再经 message_center 发布/订阅) */
 // cmd 的底盘控制数据, 由 chassis 直接读
 typedef struct
 {
@@ -215,17 +201,17 @@ typedef struct
     float shoot_rate; // 连续发射的射频,unit per s,发/秒
 } Shoot_Ctrl_Cmd_s;
 
-/* ----------------gimbal/shoot/chassis 的反馈数据（由 cmd 直接读）----------------*/
+/* gimbal/shoot/chassis 的反馈数据(由 cmd 直接读) */
 typedef struct
 {
-    uint8_t enemy_color;   // 1 for blue, 0 for red（原 Enemy_Color_e）
+    uint8_t enemy_color;   // 1 for blue, 0 for red
     uint16_t robot_level;
     uint8_t power_flag;
 } Chassis_Upload_Data_s;
 
 typedef struct
 {
-    AHRS::Output gimbal_imu_data;   // 原 attitude_t
+    AHRS::Output gimbal_imu_data;
     uint16_t yaw_motor_single_round_angle;
     float offset_diff;   // 云台与底盘偏角差
     float pitch_angle;   // pitch电机角度

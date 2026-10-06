@@ -1,27 +1,21 @@
 /**
  * @file    gimbal_algorithm.cpp
- * @brief   云台自适应跟随算法（C → C++）
- * @note    由 application/gimbal_algorithm/gimbal_algorithm.c 逐行移植：
- *          状态机、判据、滤波/前馈系数宏全部照搬，一个数字都没改。
- *          仅有的改动：
- *            1) attitude_t → AHRS::Output，字段按 PORT_MAPPING §2 映射
- *               （Pitch→euler[1], YawTotalAngle→yaw_total, Gyro[i]→gyro_b[i]）；
- *            2) ins_task.h → ahrs.h/bsp_dwt.h（DWT_GetTimeline_ms 同名同语义）。
- *          单位：euler/yaw_total 为 deg；gyro_b 为 rad/s（与旧 INS.Gyro 相同，故行为一致）。
+ * @brief   云台自适应跟随算法
+ * @note    状态机、判据、滤波/前馈系数宏全部照搬旧 C, 一个数字都没改;
+ *          姿态字段映射见 PORT_MAPPING §2。
+ *          单位：euler/yaw_total 为 deg; gyro_b 为 rad/s(与旧 INS.Gyro 相同, 故行为一致)。
  */
 #include "gimbal_algorithm.h"
-#include "bsp_dwt.h"    /* 原 bsp_dwt.h：DWT_GetTimeline_ms() */
+#include "bsp_dwt.h"    /* DWT_GetTimeline_ms() */
 
-#include <math.h>       /* fabsf/fmaxf/fminf（原头文件经 ins_task.h 间接引入） */
+#include <math.h>       /* fabsf/fmaxf/fminf */
 
 static GimbalAlgorithm_t gimbal_algorithm_yaw;
 static GimbalAlgorithm_t gimbal_algorithm_pitch;
 
-/**
- * @brief 复位自适应滤波的内部状态
- * @note  从 0 电流/停止态回到控制态时必须调用: 否则 filtered_cmd / last_cmd 还是停机前的旧值,
- *        云台会从旧值缓慢爬向新目标(表现为"重新开控制档时云台自己大幅旋转")
- */
+/* 复位自适应滤波的内部状态。从 0 电流/停止态回到控制态时必须调用:
+ * 否则 filtered_cmd / last_cmd 还是停机前的旧值, 云台会从旧值缓慢爬向新目标
+ * (表现为"重新开控制档时云台自己大幅旋转") */
 void GimbalAlgorithmReset(void)
 {
     gimbal_algorithm_yaw.cmd = 0.0f;
@@ -45,16 +39,13 @@ void GimbalAlgorithmReset(void)
     gimbal_algorithm_pitch.direction_changed = false;
 }
 
-/**
- * @brief 方向变化检测函数
- */
+/* 方向变化检测(三角波拐点) */
 static void DetectDirectionChange(GimbalAlgorithm_t *gimbal)
 {
     float current_cmd_delta  =    gimbal->cmd_delta;
     float last_cmd_delta     =    gimbal->last_cmd_delta;
     float current_time       =    gimbal->current_time;
 
-    // 方向变化检测（三角波拐点）
     if (current_cmd_delta * last_cmd_delta < 0 && fabsf(current_cmd_delta) > 0.1f)
     {
         gimbal->direction_changed = true;
@@ -69,24 +60,18 @@ static void DetectDirectionChange(GimbalAlgorithm_t *gimbal)
     }
 }
 
-/**
- * @brief 自适应跟随控制核心（通用，由调用方指定实例和轴）
- * @param is_pitch true=Pitch轴(温和参数), false=Yaw轴(快速响应)
- */
+/* 自适应跟随控制核心(通用, 由调用方指定实例和轴)
+ * is_pitch=true 用 Pitch 温和参数, false 用 Yaw 快速响应参数 */
 static float Cal_FollowControl_Internal(GimbalAlgorithm_t *gimbal, AHRS::Output gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv, float imu_angle, float imu_gyro, float cmd_value, bool is_pitch)
 {
-    // 获取当前时间和角度
     gimbal->current_time = DWT_GetTimeline_ms();
     gimbal->current_angle = imu_angle;
     gimbal->cmd = cmd_value;
 
-    // 计算指令变化量
     gimbal->cmd_delta = gimbal->cmd - gimbal->last_cmd;
 
-    // 方向变化检测
     DetectDirectionChange(gimbal);
 
-    // 计算误差
     gimbal->error = gimbal->cmd - gimbal->current_angle;
     gimbal->error_rate = 0 - imu_gyro;
 
@@ -137,31 +122,24 @@ static float Cal_FollowControl_Internal(GimbalAlgorithm_t *gimbal, AHRS::Output 
         gimbal->static_error_accumulator *= 0.001f;
     }
 
-    // 应用滤波
     gimbal->filtered_cmd = gimbal->filter_factor * gimbal->cmd + (1.0f - gimbal->filter_factor) * gimbal->filtered_cmd;
 
-    // 添加静态误差补偿
     gimbal->filtered_cmd += gimbal->static_error_accumulator;
 
-    // 更新历史变量
     gimbal->last_cmd = gimbal->cmd;
     gimbal->last_cmd_delta = gimbal->cmd_delta;
 
     return gimbal->filtered_cmd;
 }
 
-/**
- * @brief 云台偏航轴自适应跟随控制
- */
+/* 云台偏航轴自适应跟随控制 */
 float Cal_FollowControl_Set_Yaw(AHRS::Output gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv)
 {
     return Cal_FollowControl_Internal(&gimbal_algorithm_yaw, gimbal_IMU_data, gimbal_cmd_recv,
         gimbal_IMU_data.yaw_total, gimbal_IMU_data.gyro_b[2], gimbal_cmd_recv.yaw, false);
 }
 
-/**
- * @brief 云台俯仰轴自适应跟随控制（使用 Pitch 专用温和参数）
- */
+/* 云台俯仰轴自适应跟随控制(Pitch 专用温和参数) */
 float Cal_FollowControl_Set_Pitch(AHRS::Output gimbal_IMU_data, Gimbal_Ctrl_Cmd_s gimbal_cmd_recv)
 {
     return Cal_FollowControl_Internal(&gimbal_algorithm_pitch, gimbal_IMU_data, gimbal_cmd_recv,

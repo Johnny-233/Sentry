@@ -1,15 +1,10 @@
 /**
  * @file    gimbal.cpp
- * @brief   云台应用层（C → C++）
- * @note    由 application/gimbal/gimbal.c 移植。
- *          - pitch（小米 MI 电机）逻辑逐行照搬：PITCH_BRINGUP_TEST、上电回零状态机 PitchHomingTask()、
- *            软限位、MI 位置控制，参数/时序/判据一个数字都没改；
- *          - yaw（GM6020）按 application/PORT_MAPPING.md §6 做结构适配：原 C 版把 IMU 当"外部反馈"
- *            塞进电机控制器（OTHER_FEED + &INS.YawTotalAngle / &INS.Gyro[2]），对方 DJIMotor 没有
- *            外部反馈通路，故把原电机控制器里的角度环+速度环搬到应用层（见下面 yaw 段）。
- *          - 消息中心（SubRegister/PubRegister/SubGetMessage/PubPushMessage）全部删除，改为直接访问
- *            全局实例（规约 §1.5）：读 robot_cmd.cpp 的 gimbal_cmd_recv，写 gimbal.cpp 的 gimbal_feedback_data。
- *          - INS_Init() 由全局姿态实例 g_ahrs 取代（定义在 application/cmd/robot_cmd.cpp）。
+ * @brief   云台应用层
+ * @note    pitch(小米 MI 电机)逻辑逐行照搬旧 C: 上电回零状态机 PitchHomingTask()、软限位、
+ *          MI 位置控制, 参数/时序/判据一个数字都没改;
+ *          yaw(GM6020)按 PORT_MAPPING.md §6 适配: 对方 DJIMotor 没有外部反馈通路, 原电机
+ *          控制器里的角度环+速度环搬到应用层(见下面 yaw 段)。
  *          禁堆、禁异常、静态实例。
  */
 
@@ -26,40 +21,37 @@
 
 #include <math.h>
 
-/* 全局姿态实例：定义在 application/cmd/robot_cmd.cpp（取代原 INS_Init() 返回的姿态指针）。
- * 自己写 extern 声明，避免依赖 robot_cmd.h 的当前版本。 */
+/* 全局姿态实例：定义在 application/cmd/robot_cmd.cpp */
 extern AHRS g_ahrs;
-/* cmd → gimbal 的控制指令：定义在 application/cmd/robot_cmd.cpp（规约 §1.5） */
+/* cmd → gimbal 的控制指令：定义在 application/cmd/robot_cmd.cpp */
 extern Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 
-/* 云台反馈数据：定义在这里，extern 声明在 gimbal.h（规约 §1.5：cmd 直接读） */
+/* 云台反馈数据：定义在这里, extern 声明在 gimbal.h */
 Gimbal_Upload_Data_s gimbal_feedback_data;
 
 /* 电机静态实例（禁堆）：yaw = GM6020(&hcan2, tx_id=1)；pitch = 小米 MI 电机(&hcan2, 扩展帧) */
 static DJIMotor yaw_motor;
 static MIMotor  pitch_motor;
-static uint8_t motor_init = 0;   // 原 gimbal.c 的 motor_init：0 = 需要重新使能/清积分/重设设定值
+static uint8_t motor_init = 0;   // 0 = 需要重新使能/清积分/重设设定值
 
 /* ==================== yaw 结构适配（PORT_MAPPING §6）====================
- * 原 C 版：angle_feedback_source = OTHER_FEED + other_angle_feedback_ptr = &INS.YawTotalAngle（角度环）
- *          speed_feedback_source = OTHER_FEED + other_speed_feedback_ptr = &INS.Gyro[2]（速度环）
- * 现在（对方 DJIMotor 没有外部反馈通路，两个环都在应用层）：
- *   角度环设定值 = gimbal_cmd_recv.yaw (deg)，反馈 = g_ahrs.output_.yaw_total (deg)
- *   角度环输出   = 期望角速度 (deg/s) —— 即速度环设定值
- *   速度环反馈   = g_ahrs.output_.gyro_b[2]（rad/s，与旧 INS.Gyro[2] 同单位，故增益不用改）
- *   速度环输出   = 电流计数 → yaw_motor.setCurrent(输出 / 25000.0f)（GM6020 电压控制量程 ±25000）
- * 两个环都在 200Hz 的 ROBOT 任务（GimbalTask）里跑 → period = 5ms。
- * 旧 C 的 ki 单位是秒、输出是电流计数，量纲/单位换算交给 application/pid_port.h（见其文件头推导）。 */
+ * 原 C 版把 IMU 当"外部反馈"塞进电机控制器(角度环 OTHER_FEED + &INS.YawTotalAngle,
+ * 速度环 &INS.Gyro[2])；对方 DJIMotor 没有外部反馈通路, 故两个环都在应用层:
+ *   角度环: 设定 = gimbal_cmd_recv.yaw(deg), 反馈 = g_ahrs.output_.yaw_total(deg), 输出 = 期望角速度(deg/s)
+ *   速度环: 设定 = 角度环输出, 反馈 = g_ahrs.output_.gyro_b[2](rad/s, 与旧 INS.Gyro[2] 同单位 → 增益不用改)
+ *   速度环输出 = 电流计数 → yaw_motor.setCurrent(输出 / 25000.0f)(GM6020 电压控制量程 ±25000)
+ * 两个环都在 200Hz 的 ROBOT 任务(GimbalTask)里跑 → period = 5ms;
+ * 旧 C 的 ki 单位是秒、输出是电流计数, 量纲/单位换算交给 pid_port.h(见其文件头推导)。 */
 static PID yaw_angle_pid;
 static PID yaw_speed_pid;
-static float yaw_ff_last_measure = 0.0f;   // 角度环前馈用：上一次角度反馈（旧 controller.c 的 Last_Measure）
+static float yaw_ff_last_measure = 0.0f;   // 角度环前馈用：上一次设定值(设定值差分前馈)
 
-/* 旧 C 配置一字不改（数值取自 application/gimbal/gimbal.c 的 controller_param_init_config） */
+/* 数值照抄旧 C(controller_param_init_config), 一字不改 */
 static const PidPort kYawAnglePid = {
-    .Kp = 95,  // 110 时出现高频抖动 -> 回退一档(30->40->80->110->95)
-    .Ki = 60,  // 20 -> 60：稳态跟随误差补足时间 1.7~2s -> 约 0.6s
-    .Kd = 9,   // 3->6->9 提高阻尼, 抑制高 Kp 带来的抖动
-    .IntegralLimit = 250,  // 该输出经速度环(×约50)后相当于电流偏置, 250 -> 约 12500 计数
+    .Kp = 95,  // 110 抖动, 回退一档
+    .Ki = 60,  // 补足稳态跟随误差: 1.7s → 0.6s
+    .Kd = 9,   // 提高阻尼, 抑制高 Kp 抖动
+    .IntegralLimit = 250,  // 经速度环(×约50)后≈12500 计数的电流偏置
     .MaxOut = 330,
     .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
     .DeadBand = 0.1f,
@@ -67,16 +59,15 @@ static const PidPort kYawAnglePid = {
 };
 static const PidPort kYawSpeedPid = {
     .Kp = 50,
-    .Ki = 60,  // 150 -> 60, 抑制锁定微振
+    .Ki = 60,  // 150 → 60: 抑制锁定微振
     .Kd = 0,
-    .IntegralLimit = 6000,  // 稳态匀速跟随时需要积分提供偏置电流, 原 3000 偏紧
+    .IntegralLimit = 6000,  // 匀速跟随需积分提供偏置电流, 3000 偏紧
     .MaxOut = 20000,
     .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-    .FF_Gain = 0.0f,  // 加速度前馈原为 500(从未生效)，这里保持 0：陀螺噪声会被微分放大
+    .FF_Gain = 0.0f,  // 陀螺噪声会被微分放大, 保持 0(旧 500 从未生效)
 };
 
-/* pitch 位置环的 kp/kd：原来从 pitch_motor->motor_controller.angle_PID.Kp/.Kd 取，
- * 电机内部环不存在了，改成 gimbal.cpp 内的常量（值不变：Kp=15, Kd=1.0） */
+/* pitch 位置环的 kp/kd：旧版取自 pitch_motor->motor_controller.angle_PID, 值不变(Kp=15, Kd=1.0) */
 static const float PITCH_ANGLE_KP = 15.0f;
 static const float PITCH_ANGLE_KD = 1.0f;
 
@@ -94,24 +85,23 @@ static const uint8_t MI_MOTOR_ID = 127;
 
 void GimbalInit()
 {
-    /* 原: gimbal_IMU_data = INS_Init();
-     * 现在姿态实例 g_ahrs 已由 RobotCMDInit() 初始化(init/预热/校准)并在 robot.cpp 里 start()，
-     * 这里只引用全局实例，不再初始化 IMU（规约 §2）。 */
+    /* 姿态实例 g_ahrs 已由 RobotCMDInit() 初始化(预热/校准)并在 robot.cpp 里 start(),
+     * 这里只引用全局实例, 不再初始化 IMU。 */
 
     /* ---- YAW: GM6020, &hcan2, tx_id = 1 ---- */
     DJIMotor::Config yaw_config = {
         .can_handle = &hcan2,
-        .motor_id = 1,                           // 原 can_init_config.tx_id = 1
+        .motor_id = 1,
         .motor_type = DJIMotor_6020,
-        .direction = DJIM_DIRECTION_NORMAL,       // 原 motor_reverse_flag = MOTOR_DIRECTION_NORMAL
-        .reduction_ratio = 1.0f,                  // 6020 用 1.0（规约 §2）
+        .direction = DJIM_DIRECTION_NORMAL,
+        .reduction_ratio = 1.0f,                  // 6020 用 1.0
         /* 电机内部 PID 全部不用（规约 §6 的环搬到应用层）：本工程只对 yaw 电机用
          * setCurrent()（pid_mode_ = Current），DJIMotor::update() 不会走内部两个 PID。
          * 位置环/速度环的 kp/ki/kd 在旧版里也是给"外部反馈"用的，这里留空。 */
         .pid_angle = {},
         .pid_velocity = {},
-        .pos_freq_div = 1,                        // 位置环分频，仅内部环使用
-        .initial_angle = 0.0f,                    // 原 C 未设置（0）
+        .pos_freq_div = 1,                        // 仅内部环使用
+        .initial_angle = 0.0f,
     };
     yaw_motor.init(yaw_config);
 
@@ -129,12 +119,8 @@ void GimbalInit()
 #if PITCH_BRINGUP_TEST
     pitch_motor.stop(); // 测试: 自由状态(可被重力/手移动), 仅读取上报角度
 #else
-    pitch_motor.setEnable(1);   // 原 MIMotorEnable(pitch_motor)
-    /* 不再调用 setMechPositionToZero():
-     * 实测三次断电重启后, 电机上报角度在"自由下垂到底"的同一姿态下分别为 -1.16719 / -1.17675 / -1.16642 rad
-     * (极差 0.0103 rad = 0.59 度, 其中两次仅差 0.04 度), 说明"掉电后回到的基准"是稳定的 ——
-     * 因此改用固定绝对限位(robot_def.h 里按机械上下限实测值标定), 不需要也不应该再重设机械零位。
-     * 这样烧录、复位、断电重启、换电池全部一致。 */
+    pitch_motor.setEnable(1);
+    /* 这里不调 setMechPositionToZero(): 零位统一由下面的上电回零(homing)在找到机械下限后设定 */
 #endif
 
     /* 原 gimbal_pub/gimbal_sub 的注册已删除（规约 §1.5：消息中心全部去掉，改直接读全局实例） */
@@ -143,12 +129,10 @@ void GimbalInit()
 /* ==================== pitch 上电回零 (homing) ====================
  * 为什么必须做: 实测 MI 电机每次上电后上报角度的绝对基准都会变(数值不一致),
  * 因此"固定绝对限位"不可行(上次的测试固件没使能电机, 所以没暴露这个问题)。
- * 做法: 首次进入云台模式时, 用一个缓慢推进的位置目标往下"找"机械下限:
- *       - 每周期只推进 HOMING_STEP_RAD(200Hz => 0.2 rad/s), 顶到限位时位置误差会缓慢累积;
- *       - 位置误差连续超阈值 => 判定已到下限;
- *       - 在那里发送"设置机械零位"(通信类型6), 之后所有软限位都相对这个零点, 每次上电都一致;
- *       - 设零后必须静默几拍(只发零位命令, 不再发位置命令), 否则会被下一个位置命令覆盖 ——
- *         MI 电机发送用的是同一个静态缓冲(见 CODE_REVIEW 的 N6)。
+ * 做法: 首次进入云台模式时, 每拍只推进 HOMING_STEP_RAD 往下"找"机械下限(顶到限位时位置误差缓慢累积),
+ *       连续超阈值即判定到下限, 在那里发"设置机械零位"(通信类型6), 之后软限位都相对这个零点;
+ *       设零后必须静默几拍(只发零位命令, 不再发位置命令), 否则会被下一个位置命令覆盖 ——
+ *       MI 电机发送用的是同一个静态缓冲(见 CODE_REVIEW 的 N6)。
  * 安全: 回零用很小的 kp(推力小) + 限时(超时则放弃回零并报错, 不用未标定的限位驱动机构)。
  * ⚠️ 上机首次验证: 观察回零时炮管是否朝"下"移动; 若朝上走, 把 PITCH_HOMING_DIR 改成 -1.0f。 */
 #define PITCH_HOMING_ENABLE 1
@@ -194,7 +178,7 @@ static uint8_t PitchHomingTask(void)
     if (state == 4)
         return 0;
 
-    float angle = pitch_motor.angle_;   // 原 pitch_motor->measure.angle (rad)
+    float angle = pitch_motor.angle_;   // rad
 
     if (state == 0)
     {
@@ -211,7 +195,7 @@ static uint8_t PitchHomingTask(void)
         if (++wd_cnt < 20)
             return 0;
 
-        pitch_motor.setEnable(1);       // 原 MIMotorEnable(pitch_motor)
+        pitch_motor.setEnable(1);
         start_angle = angle;
         target = angle;
         stall_cnt = 0;
@@ -267,13 +251,13 @@ static uint8_t PitchHomingTask(void)
             LOG_ERR(LOG_MOD_GIMB, "homing",
                     "pitch homing FAILED (no stall within %d mrad) -> pitch disabled, check PITCH_HOMING_DIR",
                     (int)(HOMING_MAX_RAD * 1000.0f));
-            pitch_motor.stop();          // 原 MIMotorInstancestop(pitch_motor)
+            pitch_motor.stop();
             state = 4;
         }
         return 0;
     }
 
-    /* state == 2: 静默几拍, 保证"设置机械零位"真的发出去(发送缓冲是共享的) */
+    /* state == 2: 静默几拍, 见文件头 */
     silence_cnt++;
     if (silence_cnt >= HOMING_SILENCE_CNT)
     {
@@ -288,16 +272,13 @@ static uint8_t PitchHomingTask(void)
     return 0;
 }
 
-/* yaw 串级控制（原电机控制器内的 angle_PID → speed_PID，搬到应用层，PORT_MAPPING §6） */
+/* yaw 串级控制: 角度环 → 速度环, 两个环都在应用层 */
 static void YawControlUpdate(void)
 {
     float yaw_total = g_ahrs.output_.yaw_total;   // 角度反馈 [deg]
     float yaw_gyro  = g_ahrs.output_.gyro_b[2];   // 速度反馈 [rad/s]（与旧 INS.Gyro[2] 同单位）
 
-    /* 角度环：位置式，输出 = 期望角速度。
-     * 前馈：旧 controller.c 是 Output += FF_Gain*(Measure - Last_Measure)（反馈差分，无 dt），
-     * 对方 PID 只有在 features 带 FeatureFeedforward 且外部先 setFeedforward(v) 时才加 v*feedforward_gain，
-     * 所以这里自己算"本次反馈 - 上次反馈"，在 update() 之前喂进去（单位换算见 pid_port.h）。 */
+    /* 角度环：位置式，输出 = 期望角速度。前馈需外部先 setFeedforward(差分), 见 pid_port.h。 */
     /* 前馈源改用**设定值差分**（不是反馈差分）：反馈差分在底盘快转/振动时噪声很大，
        FF_Gain=120 会把它放大成"甩云台"——现象就是云台快转时被拽向底盘、世界角保不住。
        设定值差分只反映摇杆/视觉下达的运动(等效"提前给出设定速率的 ~60%")，
@@ -372,7 +353,7 @@ static void GimbalStateSet()
            （现象：切 C 档再切回 N 就再也控不了）。改发 kp=kd=0 的零力矩运控帧：不出力、可自由
            推动、位置基准不丢，MiMotorControl() 会 100Hz 持续重发。pitch_homed 保持不变。 */
         pitch_motor.locationControl(pitch_motor.angle_, 0.0f, 0.0f);
-        yaw_motor.setEnable(0);        // 原 DJIMotorStop(yaw_motor)
+        yaw_motor.setEnable(0);
         motor_init = 0;
         /* 0 电流态清零两个 PID 积分（规约 §6）：原逻辑在"重新进入控制态"的 motor_init 分支里清，
          * 这里停机时也清一次，避免停机期间用手转动云台积累积分 windup。 */
@@ -380,8 +361,8 @@ static void GimbalStateSet()
         yaw_speed_pid.resetIntegral();
         break;
     case GIMBAL_GYRO_MODE:
-        yaw_motor.setEnable(1);                                  // 原 DJIMotorEnable(yaw_motor)
-        yaw_angle_pid.setSetpoint(gimbal_cmd_recv.yaw);           // 原 DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw)
+        yaw_motor.setEnable(1);
+        yaw_angle_pid.setSetpoint(gimbal_cmd_recv.yaw);
 #if PITCH_BRINGUP_TEST
         pitch_motor.stop(); // 测试: 保持自由, 绝不用未标定的限位去驱动机构
 #else
@@ -393,20 +374,19 @@ static void GimbalStateSet()
         if (PitchHomingTask()) // 回零完成前不执行正常位置控制(期间只做"缓慢找下限")
 #endif
         {
-            // 原: MI_motor_LocationControl(pitch_motor, cmd.pitch, angle_PID.Kp, angle_PID.Kd)
             pitch_motor.locationControl(gimbal_cmd_recv.pitch, PITCH_ANGLE_KP, PITCH_ANGLE_KD);
         }
 #endif
         if (motor_init == 0)
         {
-            pitch_motor.setEnable(1);   // 原 MIMotorEnable(pitch_motor)
+            pitch_motor.setEnable(1);
             // 清除yaw PID积分,防止停机期间积分windup导致使能瞬间过流
             yaw_angle_pid.resetIntegral();
             yaw_speed_pid.resetIntegral();
-            // 以当前角度初始化设定值,避免阶跃（原: yaw_motor->motor_controller.pid_ref = YawTotalAngle）
+            // 以当前角度初始化设定值,避免阶跃
             yaw_angle_pid.setSetpoint(g_ahrs.output_.yaw_total);
-            yaw_ff_last_measure = gimbal_cmd_recv.yaw;  // 前馈基准: 与"设定值差分"前馈源保持一致
-            gimbal_feedback_data.init_location = g_ahrs.output_.euler[1];  // 原 gimbal_IMU_data->Pitch
+            yaw_ff_last_measure = gimbal_cmd_recv.yaw;  // 前馈基准: 与设定值差分前馈同源
+            gimbal_feedback_data.init_location = g_ahrs.output_.euler[1];
             motor_init = 1;
         }
         // yaw 串级控制（角度环 + 速度环，都在应用层）
@@ -425,7 +405,7 @@ static void GimbalStateSet()
 
 static void SendGimbalData()
 {
-    gimbal_feedback_data.gimbal_imu_data = g_ahrs.output_;   // 原 *gimbal_IMU_data
+    gimbal_feedback_data.gimbal_imu_data = g_ahrs.output_;
     /* 原 yaw_motor->measure.angle_single_round = 0.043945 * ecd（单圈 0~360 度，cmd 用它算与零位的偏角）。
      * 对方 DJIMotor 不再暴露原始 ecd，这里用累计角度取单圈值，量纲与旧版一致（度，0~360）。
      * TODO(移植): 与 robot_cmd 的 CalcOffsetAngle/YAW_ALIGN_ANGLE(度) 联调确认。 */
@@ -436,17 +416,10 @@ static void SendGimbalData()
     gimbal_feedback_data.pitch_angle = pitch_motor.angle_; /* 原 C 版这句移植时漏了(UI/自瞄恒读 0) */
 }
 
-/* 机器人云台控制核心任务 */
 void GimbalTask()
 {
-    // 获取云台控制数据：原 SubGetMessage(gimbal_sub, &gimbal_cmd_recv)
-    // 现在 gimbal_cmd_recv 就是 robot_cmd.cpp 里的全局实例，直接读，无需拷贝
-    // 云台启停
     GimbalStateSet();
-    // 设置反馈数据,主要是imu和yaw的ecd
     SendGimbalData();
-    // 推送消息：原 PubPushMessage(gimbal_pub, &gimbal_feedback_data)
-    // 现在 gimbal_feedback_data 已是全局实例，cmd 直接读，无需推送
 }
 
 DJIMotor* GetYawMotor(void)

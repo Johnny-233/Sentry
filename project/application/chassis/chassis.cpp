@@ -1,16 +1,9 @@
 /**
  * @file    chassis.cpp
- * @brief   底盘应用(由 application/chassis/chassis.c 移植)
+ * @brief   底盘应用
  *
- * 移植差异:
- *   1. 旧的 current_PID 电流环在对方框架里由电机模块内部承担
- *   2. message_center 的 SubRegister/PubRegister/SubGetMessage/PubPushMessage 全部删除,
- *      改为直接访问全局实例(规约 §1.5): chassis_cmd_recv 由 robot_cmd.cpp 定义,
- *      chassis_feedback_data 在本文件定义
- *   3. 底层实例类型: DJIMotorInstance* → DJIMotor 静态实例; SuperCapInstance* → SuperCap 静态实例
- *   4. 控制逻辑(状态机 / 麦轮逆解 / 限幅判断)与 chassis.c 逐行一致
- *   5. PID 配置数值照抄旧 C, 输出量纲(A vs 电流计数)/积分时间(ms vs s)/输出限幅的换算
- *      统一交给 application/pid_port.h 的 pidPort()
+ * 控制逻辑(状态机 / 麦轮逆解 / 限幅判断)与旧 C 版 chassis.c 逐行一致; 电流环由电机模块内部承担。
+ * PID 数值照抄旧 C, 输出量纲(A vs 电流计数)/积分时间(ms vs s)/限幅的换算统一交给 pid_port.h。
  */
 #include "chassis.h"
 #include "robot_def.h"
@@ -22,21 +15,20 @@
 #include "bsp_dwt.h"
 #include "arm_math.h"
 
-/* chassis_cmd_recv / gimbal_cmd_recv / shoot_cmd_recv 的 extern 声明在 robot_cmd.h(规约 §1.5) */
+/* chassis_cmd_recv 等的 extern 声明在 robot_cmd.h */
 
-/* 旧 general_def.h 里的角度/弧度转换系数, 同值搬过来 */
+/* 与 robot_def.h 中的定义同值 */
 #ifndef DEGREE_2_RAD
 #define DEGREE_2_RAD 0.01745329252f // pi/180
 #endif
 
-/* 根据robot_def.h中的macro自动计算的参数 */
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)   // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #ifndef PERIMETER_WHEEL
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
 #endif
 
-/* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
+/* 底盘是单例, 不需要单独的结构体 */
 static float sin_theta, cos_theta; // 底盘速度解算用
 
 static float chassis_rotate_buff;
@@ -47,18 +39,17 @@ static DJIMotor motor_lf, motor_rf, motor_lb, motor_rb;              // left rig
 /* 用于自旋变速策略的时间变量 */
 static float t;
 
-/* 底盘回传的反馈数据(定义在本文件, extern 声明在 chassis.h) */
 Chassis_Upload_Data_s chassis_feedback_data;
 
 /* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
 static float chassis_vx, chassis_vy;     // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出,待进行限幅
 
-/* 旧 C 的速度环配置原样照抄(数值一字不改), 量纲/积分单位/输出限幅的换算见 pid_port.h */
+/* 速度环数值照抄旧 C(一字不改), 量纲/积分单位/输出限幅的换算见 pid_port.h */
 static const PidPort kChassisSpeedPid = {
-    .Kp = 10, // 4.5
-    .Ki = 0,  // 0
-    .Kd = 0,  // 0
+    .Kp = 10,
+    .Ki = 0,
+    .Kd = 0,
     .IntegralLimit = 3000,
     .MaxOut = 12000,
     .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -67,7 +58,7 @@ static const PidPort kChassisSpeedPid = {
 /* 旧 current_PID（底盘）: Kp=0.5, Ki=0, Kd=0, IntegralLimit=3000, MaxOut=15000(ESC 计数)。
    内环在安培域跑，故只有 MaxOut 要换算: 15000*PID_SCALE_M3508 = 18.31A。 */
 static const PidPort kChassisCurrentPid = {
-    .Kp = 0.5f, // 0.4
+    .Kp = 0.5f,
     .Ki = 0.0f,
     .Kd = 0.0f,
     .IntegralLimit = 3000,
@@ -77,8 +68,7 @@ static const PidPort kChassisCurrentPid = {
 
 void ChassisInit()
 {
-    // 指定初始化器必须按声明顺序: can_handle, motor_id, motor_type, direction,
-    //                               reduction_ratio, pid_angle, pid_velocity, ...
+    // 指定初始化器必须按声明顺序(can_handle, motor_id, ..., reduction_ratio, pid_velocity, ...)
     DJIMotor::Config chassis_motor_config = {
         .can_handle = &hcan1,
         .motor_type = DJIMotor_3508,
@@ -95,19 +85,19 @@ void ChassisInit()
     };
 
     chassis_motor_config.motor_id = 4;
-    chassis_motor_config.direction = DJIM_DIRECTION_REVERT; // 原 MOTOR_DIRECTION_REVERSE
+    chassis_motor_config.direction = DJIM_DIRECTION_REVERT;
     motor_lf.init(chassis_motor_config);
 
     chassis_motor_config.motor_id = 3;
-    chassis_motor_config.direction = DJIM_DIRECTION_NORMAL; // 原 MOTOR_DIRECTION_NORMAL
+    chassis_motor_config.direction = DJIM_DIRECTION_NORMAL;
     motor_rf.init(chassis_motor_config);
 
     chassis_motor_config.motor_id = 1;
-    chassis_motor_config.direction = DJIM_DIRECTION_REVERT; // 原 MOTOR_DIRECTION_REVERSE
+    chassis_motor_config.direction = DJIM_DIRECTION_REVERT;
     motor_lb.init(chassis_motor_config);
 
     chassis_motor_config.motor_id = 2;
-    chassis_motor_config.direction = DJIM_DIRECTION_NORMAL; // 原 MOTOR_DIRECTION_NORMAL
+    chassis_motor_config.direction = DJIM_DIRECTION_NORMAL;
     motor_rb.init(chassis_motor_config);
 
     SuperCap::Config capconfig = {
@@ -126,14 +116,14 @@ static void ChassisStateSet()
 {
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
-        motor_lf.setEnable(0); // 原 DJIMotorStop
+        motor_lf.setEnable(0);
         motor_rf.setEnable(0);
         motor_lb.setEnable(0);
         motor_rb.setEnable(0);
     }
     else
     { // 正常工作
-        motor_lf.setEnable(1); // 原 DJIMotorEnable
+        motor_lf.setEnable(1);
         motor_rf.setEnable(1);
         motor_lb.setEnable(1);
         motor_rb.setEnable(1);
@@ -145,10 +135,7 @@ static void SendPowerData()
     power_data = chassis_cmd_recv.power_limit;
 }
 
-/**
- * @brief 计算每个底盘电机的输出,正运动学解算
- *
- */
+/* 云台系速度按 offset_angle 旋到底盘系, 再分配到四个麦轮 */
 static void MecanumCalculate()
 {
     cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
@@ -163,26 +150,7 @@ static void MecanumCalculate()
     vt_rf = chassis_vx + chassis_vy + chassis_cmd_recv.wz * RF_CENTER;
 }
 
-static void OmniCalculate()
-{
-    cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-
-    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
-
-    // 全向轮 X 型布局逆运动学: v_i = vx*cos(α_i) + vy*sin(α_i) + R*ω
-    // 轮子角度: LF=45°, RF=135°, LB=225°, RB=315°
-    // 乘以 √2 使输出幅值与麦轮解算一致
-    vt_lf = chassis_vx + chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
-    vt_rf = -chassis_vx + chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
-    vt_lb = -chassis_vx - chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
-    vt_rb = chassis_vx - chassis_vy + chassis_cmd_recv.wz * OMNI_WHEEL_CHASSIC_RADIUS;
-}
-/**
- * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
- *
- */
+/* 用电容电压判定 power_flag, 并把四轮目标速度下发给速度环 */
 static void LimitChassisOutput()
 {
 
@@ -195,22 +163,17 @@ static void LimitChassisOutput()
         chassis_feedback_data.power_flag = 0;
     }
 
-    // 完成功率限制后进行电机参考输入设定
-    motor_lf.setVelocity(vt_lf); // 原 DJIMotorSetRef(速度环, 单位 deg/s)
+    motor_lf.setVelocity(vt_lf); // 单位 deg/s
     motor_rf.setVelocity(vt_rf);
     motor_lb.setVelocity(vt_lb);
     motor_rb.setVelocity(vt_rb);
 }
 
-/* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
     ChassisStateSet();
-    // 根据控制模式进行正运动学解算,计算底盘输出
     MecanumCalculate();
-    // OmniCalculate();
-    // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
     SendPowerData();
-    cap.send((uint8_t *)&power_data, sizeof(power_data)); // 原 SuperCapSend(cap, (uint8_t*)&power_data)
+    cap.send((uint8_t *)&power_data, sizeof(power_data));
 }

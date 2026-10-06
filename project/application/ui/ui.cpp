@@ -1,21 +1,8 @@
 /**
  * @file    ui.cpp
  * @brief   裁判系统 UI（司机端界面）绘制
- * @note    由 Modules/referee/referee_task.c 移植（该文件里的裁判数据收发部分不属于本文件，
- *          已由对方框架 project/modules/referee/referee.cpp 接管；数据结构契约见 application/ui/ui.h）。
- *
- *          旧的绘制原语 Modules/referee/referee_UI.c/.h **不移植**，改用对方框架
- *          project/modules/referee/referee.h 的原语，逐一对应关系：
- *            UIDelete(...)             → Referee_UIDelete(operate, layer)
- *            UILineDraw/UICircleDraw/UIRectangleDraw/UIOvalDraw/UIArcDraw/UIFloatDraw/UIIntDraw
- *                                      → Referee_UIDraw(graph_name, operate, type, layer, color, ...)
- *            UIGraphRefresh(...)       → Referee_UIRefresh(cnt, ...)
- *            UICharDraw(...)           → Referee_UIChar(graph_name, operate, layer, color, size, width, x, y, fmt, ...)
- *            UICharRefresh(...)        → Referee_UICharRefresh(data)
- *
- *          静态绘图缓冲（Graph_Data_t / String_Data_t）的映射见下方 shoot_line_location 处的说明。
- *
- *          本文件里所有数值 / 坐标 / 颜色 / 层号都与旧 referee_task.c 逐字相同，未做任何"顺手优化"。
+ * @note    旧→新绘制原语的对应关系见 ui.h;
+ *          本文件里所有数值 / 坐标 / 颜色 / 层号都与旧 referee_task.c 逐字相同, 未做任何"顺手优化"。
  */
 
 #include "ui.h"
@@ -26,31 +13,24 @@
  * 内部变量
  * ==========================================================================*/
 
-/* UI 绘制与交互所需的机器人状态数据。
- * 旧版是 application/cmd/robot_cmd.c 里的 static ui_data，通过 UITaskInit() 把指针交给 UI 任务；
- * 现在按 ui.h 的契约定义在本文件（ui.h 里已 extern 声明），robot_cmd.cpp 直接填这个实例。 */
+/* UI 绘制与交互所需的机器人状态数据(定义在本文件, robot_cmd.cpp 直接填这个实例) */
 Referee_Interactive_info_t ui_data;
 
-/* 裁判系统反馈数据指针。
- * 旧版是 referee_task.c 的 static referee_info_t *referee_recv_info，由 UITaskInit() 里
- * RefereeInit(&huart6) 的返回值赋值；新框架的 Referee_Init(&huart6) 在应用层初始化时调用，
- * 这里在 MyUIInit() 用 Referee_GetData() 取同一个静态实例。 */
+/* 裁判系统反馈数据指针。Referee_Init(&huart6) 已在应用层初始化, 这里取同一个静态实例。 */
 static referee_info_t *referee_recv_info = nullptr;
 
-/* 旧的静态绘图缓冲 UI_shoot_line[10] / UI_State_Cir[5] / UI_State_Rec[5] /
- * UI_State_sta[12] / UI_State_dyn[6] 在这里没有对应物，原因：
- *   旧版是"先 XxxDraw() 把 15 字节图形填进 Graph_Data_t 缓冲，再 UIGraphRefresh() 批量发包"的两步式；
- *   新原语 Referee_UIDraw()/Referee_UIChar() 内部自己组包并**立即发送**，一次调用就等于
- *   旧的"XxxDraw + UIGraphRefresh(cnt=1)"，而 Referee_UIRefresh()/Referee_UICharRefresh() 需要的
- *   interaction_figure_t 指针/45 字节缓冲是 referee.cpp 的私有类型，应用层拿不到，故不再使用。
- *   绘图所需的"数据"只剩下面这张坐标表，照搬旧值：
+/* 旧的两步式静态绘图缓冲(UI_shoot_line / UI_State_Cir / UI_State_Rec / UI_State_sta / UI_State_dyn)
+ * 在这里没有对应物:
+ *   Referee_UIDraw()/Referee_UIChar() 内部自己组包并**立即发送**, 一次调用 = 旧的"XxxDraw +
+ *   UIGraphRefresh(cnt=1)"; 而 Referee_UIRefresh()/Referee_UICharRefresh() 需要的
+ *   interaction_figure_t 指针/45 字节缓冲是 referee.cpp 的私有类型, 应用层拿不到, 故不再使用。
+ *   绘图所需的"数据"只剩下面这张坐标表, 照搬旧值:
  *   TODO(移植): 旧 UILineDraw(...)×5 + UIGraphRefresh(id, 5, ...) 现在变成 5 次 Referee_UIDraw()，
  *               即"5 图形打一包"(旧 UI_Data_ID_Draw5 / 新 UI_Draw5) 变成 5 个单图形包，选手端显示结果相同。
  *   TODO(移植): 旧 static Graph_Data_t UI_Energy[3]（电容能量条）在旧 referee_task.c 里声明后从未使用，未移植。 */
 static uint32_t shoot_line_location[10] = {960, 400, 540, 440, 420, 400, 380, 360, 340, 320};
 
-/* 新原语的图形名是 uint8_t*（内部只 memcpy 前 3 字节，不写回），旧代码用的是 char[3]；
- * 这里统一做一次去 const 转换，免得每个调用点都写强制转换。 */
+/* 新原语的图形名是 uint8_t*(内部只 memcpy 前 3 字节, 不写回), 这里统一去掉 const, 免得每个调用点写强转 */
 static uint8_t *UI_Name(const char *name)
 {
     return (uint8_t *)name;
@@ -64,12 +44,7 @@ static void MyUIRefresh(Referee_Interactive_info_t *_Interactive_data);
 static void UIChangeCheck(Referee_Interactive_info_t *_Interactive_data); // 模式切换检测
 static void RobotModeTest(Referee_Interactive_info_t *_Interactive_data); // 测试用函数，实现模式自动变化
 
-/**
- * @brief  判断各种ID，选择客户端ID
- * @param  none
- * @retval none
- * @attention
- */
+/* 判断各种ID, 选择客户端ID */
 static void DeterminRobotID()
 {
     // id小于7是红色,大于7是蓝色,0为红色，1为蓝色   (旧 #define Robot_Red 0 / #define Robot_Blue 1)
@@ -84,7 +59,7 @@ static void DeterminRobotID()
 
 void MyUIInit()
 {
-    referee_recv_info = Referee_GetData(); // 旧: UITaskInit() 里 referee_recv_info = RefereeInit(&huart6)
+    referee_recv_info = Referee_GetData();
 
     if (!referee_recv_info->init_flag)
         osThreadTerminate(osThreadGetId()); // TODO(移植): 旧为 vTaskDelete(NULL)。本仓用 cmsis_os v1 兼容层，没有 vTaskDelete；osThreadTerminate(osThreadGetId()) 结束当前 UI 任务，语义相同（旧代码此处没有 return，照搬）
@@ -92,11 +67,9 @@ void MyUIInit()
         osDelay(100); // 若还未收到裁判系统数据,等待一段时间后再检查
 
     DeterminRobotID();                  // 确定ui要发送到的目标客户端
-    Referee_UIDelete(UI_Delete_All, 0); // 清空UI (旧: UIDelete(&id, UI_Data_Del_ALL, 0)，旧 UI_Data_Del_ALL == 新 UI_Delete_All == 2)
+    Referee_UIDelete(UI_Delete_All, 0); // 清空UI(旧 UI_Data_Del_ALL == 新 UI_Delete_All == 2)
 
-    // 绘制发射基准线 955
-    // 旧: UILineDraw(&UI_shoot_line[0], "sl0", UI_Graph_ADD, 7, UI_Color_White, 2, x1, y1, x2, y2)
-    // 新: Referee_UIDraw(图形名, 操作, 图形类型, 图层, 颜色, 线宽, 起点x, 起点y, 终点x, 终点y)
+    // 绘制发射基准线; 新原语 Referee_UIDraw 参数序: (图形名, 操作, 图形类型, 图层, 颜色, 线宽, 起点x, 起点y, 终点x, 终点y)
     Referee_UIDraw(UI_Name("sl0"), UI_Graph_Add, UI_Graph_Line, 7, UI_Color_White,
                    (uint32_t)2, (uint32_t)shoot_line_location[0], (uint32_t)540, (uint32_t)shoot_line_location[0], (uint32_t)320);
     Referee_UIDraw(UI_Name("sl1"), UI_Graph_Add, UI_Graph_Line, 7, UI_Color_Yellow,
@@ -107,8 +80,6 @@ void MyUIInit()
                    (uint32_t)2, (uint32_t)900, (uint32_t)shoot_line_location[3], (uint32_t)1020, (uint32_t)shoot_line_location[3]);
     Referee_UIDraw(UI_Name("sl4"), UI_Graph_Add, UI_Graph_Line, 7, UI_Color_Yellow,
                    (uint32_t)2, (uint32_t)930, (uint32_t)shoot_line_location[4], (uint32_t)990, (uint32_t)shoot_line_location[4]);
-    // 旧: UIGraphRefresh(&referee_recv_info->referee_id, 5, UI_shoot_line[0..4])
-    //     —— sl0..sl4 已由上面 5 次 Referee_UIDraw 各自发出
 
     Referee_UIDraw(UI_Name("sl5"), UI_Graph_Add, UI_Graph_Line, 7, UI_Color_Yellow,
                    (uint32_t)2, (uint32_t)930, (uint32_t)shoot_line_location[5], (uint32_t)990, (uint32_t)shoot_line_location[5]);
@@ -120,27 +91,21 @@ void MyUIInit()
                    (uint32_t)2, (uint32_t)950, (uint32_t)shoot_line_location[8], (uint32_t)970, (uint32_t)shoot_line_location[8]);
     Referee_UIDraw(UI_Name("sl9"), UI_Graph_Add, UI_Graph_Line, 7, UI_Color_Yellow,
                    (uint32_t)2, (uint32_t)950, (uint32_t)shoot_line_location[9], (uint32_t)970, (uint32_t)shoot_line_location[9]);
-    // 旧: UIGraphRefresh(&referee_recv_info->referee_id, 5, UI_shoot_line[5..9])
 
-    // 状态圈 (旧: UICircleDraw(&buf, "saN", ADD, 9, White, 5, 130, y, 10) + UIGraphRefresh(id,5,...))
-    // 新原语圆的参数: 线宽, 圆心x, 圆心y, 半径
+    // 状态圈; 新原语圆的参数序: (线宽, 圆心x, 圆心y, 半径)
     Referee_UIDraw(UI_Name("sa0"), UI_Graph_Add, UI_Graph_Circle, 9, UI_Color_White, (uint32_t)5, (uint32_t)130, (uint32_t)740, (uint32_t)10);
     Referee_UIDraw(UI_Name("sa1"), UI_Graph_Add, UI_Graph_Circle, 9, UI_Color_White, (uint32_t)5, (uint32_t)130, (uint32_t)690, (uint32_t)10);
     Referee_UIDraw(UI_Name("sa2"), UI_Graph_Add, UI_Graph_Circle, 9, UI_Color_White, (uint32_t)5, (uint32_t)130, (uint32_t)640, (uint32_t)10);
     Referee_UIDraw(UI_Name("sa3"), UI_Graph_Add, UI_Graph_Circle, 9, UI_Color_White, (uint32_t)5, (uint32_t)130, (uint32_t)590, (uint32_t)10);
     Referee_UIDraw(UI_Name("sa4"), UI_Graph_Add, UI_Graph_Circle, 9, UI_Color_White, (uint32_t)5, (uint32_t)130, (uint32_t)540, (uint32_t)10);
-    // 旧: UIGraphRefresh(&referee_recv_info->referee_id, 5, UI_State_Cir[0..4])
 
-    // 绘制车辆状态标志指示
-    // 旧: UICharDraw(&UI_State_sta[0], "ss0", ADD, 8, White, 15, 2, 150, 750, "chassis:") + UICharRefresh(...)
-    // 新: Referee_UIChar(图形名, 操作, 图层, 颜色, 字号, 线宽, x, y, 格式串) —— 内部组包后立即发送
+    // 绘制车辆状态标志指示; 新原语 Referee_UIChar 参数序: (图形名, 操作, 图层, 颜色, 字号, 线宽, x, y, 格式串), 内部组包后立即发送
     Referee_UIChar(UI_Name("ss0"), UI_Graph_Add, 8, UI_Color_White, 15, 2, 150, 750, "chassis:");
     Referee_UIChar(UI_Name("ss1"), UI_Graph_Add, 8, UI_Color_White, 15, 2, 150, 700, "gimbal:");
     Referee_UIChar(UI_Name("ss2"), UI_Graph_Add, 8, UI_Color_White, 15, 2, 150, 650, "shoot:");
     Referee_UIChar(UI_Name("ss3"), UI_Graph_Add, 8, UI_Color_White, 15, 2, 150, 600, "loader:");
     Referee_UIChar(UI_Name("ss4"), UI_Graph_Add, 6, UI_Color_White, 15, 2, 150, 550, "autoaim:");
 
-    // 绘制车辆状态标志指示
     Referee_UIChar(UI_Name("ss5"), UI_Graph_Add, 8, UI_Color_Yellow, 7, 2, 1070, 440, "2m");
     Referee_UIChar(UI_Name("ss6"), UI_Graph_Add, 8, UI_Color_Yellow, 7, 2, 1070, 400, "3m");
     Referee_UIChar(UI_Name("ss7"), UI_Graph_Add, 8, UI_Color_Yellow, 7, 2, 1070, 320, "4m");
@@ -153,7 +118,6 @@ void MyUIInit()
     Referee_UIChar(UI_Name("sd3"), UI_Graph_Add, 8, UI_Color_White, 15, 2, 270, 600, "off      ");
     Referee_UIChar(UI_Name("sd4"), UI_Graph_Add, 6, UI_Color_White, 15, 2, 270, 550, "off      ");
 
-    // 旧: UIRectangleDraw(&UI_State_Rec[0], "sr0", ADD, 6, White, 3, 600, 300, 1320, 800) + UIGraphRefresh(id,1,...)
     Referee_UIDraw(UI_Name("sr0"), UI_Graph_Add, UI_Graph_Rectangle, 6, UI_Color_White, (uint32_t)3, (uint32_t)600, (uint32_t)300, (uint32_t)1320, (uint32_t)800);
 }
 
@@ -216,12 +180,8 @@ static void RobotModeTest(Referee_Interactive_info_t *_Interactive_data) // 测�
     //             编译选项带 -w，未使用静态函数不报错；要用时在 UITask() 里调用即可。
 }
 
-/**
- * @brief  UI 刷新（模式切换后重画对应的字符/图形）
- * @note   旧签名是 MyUIRefresh(referee_info_t *referee_recv_info, Referee_Interactive_info_t *_Interactive_data)；
- *         新原语内部自己取 referee_info.id.client_id 组包，不再需要传裁判 id，
- *         故这里去掉第一个参数（见 ui.cpp 顶部缓冲映射说明）。
- */
+/* UI 刷新(模式切换后重画对应的字符/图形)。
+ * 旧签名要传 referee_info_t*, 新原语自己取 client_id 组包, 故去掉第一个参数。 */
 static void MyUIRefresh(Referee_Interactive_info_t *_Interactive_data)
 {
     UIChangeCheck(_Interactive_data);
@@ -244,8 +204,6 @@ static void MyUIRefresh(Referee_Interactive_info_t *_Interactive_data)
                 Referee_UIDraw(UI_Name("sa0"), UI_Graph_Change, UI_Graph_Circle, 9, UI_Color_Green, (uint32_t)5, (uint32_t)130, (uint32_t)740, (uint32_t)10);
                 break;
         }
-        // 旧: UICharRefresh(&referee_recv_info->referee_id, UI_State_dyn[0]) 已并入上面的 Referee_UIChar
-        // 旧: UIGraphRefresh(&referee_recv_info->referee_id, 1, UI_State_Cir[0]) 已并入上面的 Referee_UIDraw
         _Interactive_data->Referee_Interactive_Flag.chassis_flag = 0;
     }
 
@@ -362,12 +320,7 @@ void UITask()
     MyUIRefresh(&ui_data);
 }
 
-/**
- * @brief  模式切换检测,模式发生切换时，对flag置位
- * @param  Referee_Interactive_info_t *_Interactive_data
- * @retval none
- * @attention
- */
+/* 模式切换检测: 模式变化时对相应 flag 置位 */
 static void UIChangeCheck(Referee_Interactive_info_t *_Interactive_data)
 {
     if (_Interactive_data->chassis_mode != _Interactive_data->chassis_last_mode)

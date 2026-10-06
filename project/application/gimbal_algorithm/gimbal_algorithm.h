@@ -1,18 +1,15 @@
 /**
  * @file    gimbal_algorithm.h
- * @brief   云台自适应跟随算法（C → C++）
- * @note    由 application/gimbal_algorithm/gimbal_algorithm.h 移植：attitude_t → AHRS::Output，
- *          结构体字段、宏、函数签名全部照搬，一个数字都没改。
- *          原头文件没有 include guard（CODE_REVIEW 已记录），这里补上（非控制逻辑改动）。
- *          单位：欧拉角/累计角 deg；gyro_b 与旧 INS.Gyro 同为 rad/s
- *          （旧 Modules/BMI088 的 BMI088_GYRO_2000_SEN = 0.001065 rad/s/LSB，
- *           新 project/modules/ahrs/ahrs.cpp 也存 rad/s），故按字面映射后行为与旧版一致。
+ * @brief   云台自适应跟随算法
+ * @note    结构体字段、宏、函数签名全部照搬旧 C, 一个数字都没改(原头文件没有 include guard, 这里补上)。
+ *          单位：欧拉角/累计角 deg; gyro_b 与旧 INS.Gyro 同为 rad/s
+ *          (旧 BMI088_GYRO_2000_SEN = 0.001065 rad/s/LSB, 新 ahrs.cpp 也存 rad/s), 故字面映射即行为一致。
  */
 #ifndef GIMBAL_ALGORITHM_H
 #define GIMBAL_ALGORITHM_H
 
 #include <stdbool.h>
-#include "ahrs.h"       /* 原 ins_task.h：AHRS::Output 取代 attitude_t */
+#include "ahrs.h"       /* AHRS::Output */
 #include "robot_def.h"  /* Gimbal_Ctrl_Cmd_s */
 
 // 云台算法状态结构体
