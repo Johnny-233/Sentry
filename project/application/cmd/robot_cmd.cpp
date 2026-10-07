@@ -489,6 +489,9 @@ static void RemoteControlSet()
 {
     ChassisRC();
     gimbal_cmd_recv.autoaim_mode = AUTO_OFF;
+    /* N 档(摇杆)也要走 BasicSet(): 否则 gimbal_mode 不会设成 GYRO, 从 C 档切回 N 后云台会停在
+       ZERO_FORCE(零电流)。S 档与 MouseKeySet() 都有它, 只有摇杆这条路径漏了。 */
+    BasicSet();
     GimbalRC();
     ShootRC();
 }
@@ -637,6 +640,10 @@ static void SentrySet()
     ChassisRotateSet();
     ShootAC();
     Sentry_GimbalAC();
+
+    /* 兜底软限位: 覆盖巡逻与视觉自瞄(FoundEnermy) 两条 pitch 写入路径 —— 自瞄的 pitch 是增量累积的,
+       没有这道夹取会把指令推出去顶到机械限位。 */
+    GimbalPitchLimit();
 }
 
 void Deathcheck()

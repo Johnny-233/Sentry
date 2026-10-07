@@ -18,6 +18,7 @@
 #include "bsp_log.h"
 #include "bsp_tim.h"
 #include "dji_motor.h"
+#include "iwdg.h"
 #include "mi_motor.h"
 #include "remote.h"
 #include "master_process.h"
@@ -26,10 +27,11 @@
 #include "cmsis_os.h"
 #include "tim.h"
 
-/* ---- 心跳标志: 只给 daemon 做卡死检测打印, 不喂硬件 IWDG ---- */
-static volatile uint8_t iwdg_alive_ins = 0;
-static volatile uint8_t iwdg_alive_motor = 0;
-static volatile uint8_t iwdg_alive_robot = 0;
+/* ---- 心跳标志: daemon 做卡死检测打印, 并且三个都为 1 才喂硬件 IWDG ----
+   非 static: iwdg.cpp 通过 iwdg.h 的 extern 声明读它们 */
+volatile uint8_t iwdg_alive_ins = 0;
+volatile uint8_t iwdg_alive_motor = 0;
+volatile uint8_t iwdg_alive_robot = 0;
 
 /* ---- 任务句柄 ---- */
 static osThreadId_t insTaskHandle;
@@ -131,6 +133,16 @@ static void StartDAEMONTASK(void *argument)
     LOG_INFO(LOG_MOD_SYS, "daemon", "[freeRTOS] Daemon Task Start\r\n");
     for (;;)
     {
+        /* IWDG 启动时机: 它一旦启动就关不掉, 所以必须等所有长耗时初始化(IMU 预热)结束。
+           任务都是 OSTaskInit() 里建的、调度器还没跑, 而 Robot_Init() 已经返回,
+           因此 DAEMON 的第一拍是"初始化全部结束"的最早安全点。 */
+        static uint8_t iwdg_started = 0;
+        if (!iwdg_started)
+        {
+            iwdg_started = 1;
+            IWDG_Init(); /* 内部已含启动后的一次喂狗 */
+        }
+
         daemon_start = DWT_GetTimeline_ms();
         /* TODO(移植): 原版在这里跑全局 DaemonTask() 与 BuzzerTask(); 对方框架的离线检测
            在各模块自己的 Daemon 实例里(挂 TIM), 蜂鸣器没有对应模块。 */
@@ -155,9 +167,10 @@ static void StartDAEMONTASK(void *argument)
         if (daemon_dt > 10)
             LOG_ERR(LOG_MOD_SYS, "daemon", "[freeRTOS] Daemon Task is being DELAY! dt = [%d]\r\n", (int)daemon_dt);
 
-        /* 控制任务卡死检测(原固件喂 IWDG, 卡死会硬件复位; 现在只打印) */
+        /* 控制任务卡死检测: 三个心跳都到齐才喂 IWDG; 缺一个就不喂, 等它 400ms 超时复位 */
         if (iwdg_alive_ins && iwdg_alive_motor && iwdg_alive_robot)
         {
+            IWDG_Feed();
         }
         else
         {
