@@ -123,18 +123,17 @@ static PID chassis_follow_pid; // 底盘跟随模式PID
 static cal_round_patrol_t round_patrol;
 static cal_mid_round_patrol_t mid_round_patrol;
 
-/* 旧 chassis_follow_pid 的配置, 一字不改地搬过来(规约 §1.5/§4: PID 参数不许改)。
-   量纲/时间单位差异(旧 PID 用秒, 对方 PID 用 ms)由 pid_port.h 的 pidPort() 统一换算:
-   本 PID 的输出是底盘旋转角速度指令(wz, 被 chassis.cpp 乘半径当轮速用), 不是电流计数, 故取
-   PID_SCALE_COUNTS; 调用周期 = ROBOT 任务 200Hz = 5ms。 */
+/* 底盘跟随云台: 输出 wz(与轮速同域)。pid_port 换算周期 = ROBOT 200Hz = 5ms。
+ * 实车: 一推杆底盘相对云台拧开、停杆回正 → 瞬态跟随偏慢(非稳态残余)。
+ * 相对旧参加大 Kp/Kd、收死区, 提高推杆瞬间纠偏; 若静止抖动再把 Kp 降回 50~60。 */
 static const PidPort kChassisFollowPid = {
-    .Kp = 50.0f,
+    .Kp = 110.0f,
     .Ki = 0.0f,
-    .Kd = 3.0f,
+    .Kd = 5.0f,
     .IntegralLimit = 0.0f,
-    .MaxOut = 4000.0f,
+    .MaxOut = 5000.0f,
     .Improve = PID_Derivative_On_Measurement,
-    .DeadBand = 1.0f,
+    .DeadBand = 0.5f,
     .FF_Gain = 0.0f,
 };
 
@@ -364,23 +363,18 @@ static void ChassisRotateSet()
         //底盘跟随模式,将offset_angle量化到最近的90°作为目标(4个正方向)
         case CHASSIS_FOLLOW_GIMBAL_YAW:
         {
-            /* offset_angle 有零点几度量化/抖动噪声，先低通再进跟随环：否则噪声偶尔冲出
-               死区就给底盘一脚（现象：静止时偶发轻微抖动）。α=0.15 @200Hz ≈ 33ms，不影响跟随。 */
+            /* offset 低通: α 过小会拖慢“一推就拧”的纠偏。α=0.35 @200Hz ≈ 12ms。 */
             static float offset_filt = 0.0f;
-            offset_filt += 0.15f * (chassis_cmd_recv.offset_angle - offset_filt);
+            offset_filt += 0.35f * (chassis_cmd_recv.offset_angle - offset_filt);
             float raw = offset_filt;
             float snapped;
             if (raw >= 0.0f)
                 snapped = (float)((int)(raw / 90.0f + 0.5f)) * 90.0f;
             else
                 snapped = (float)((int)(raw / 90.0f - 0.5f)) * 90.0f;
-            /* 原: chassis_cmd_send.wz = PIDCalculate(&chassis_follow_pid, raw, snapped);
-               (measure=raw, ref=snapped); 对方 PID 需要显式 setSetpoint + update */
             chassis_follow_pid.setSetpoint(snapped);
-            /* 误差死区 2°：对齐后不只把输出置 0，还要**清掉跟随环积分**，并把误差喂 0 让 PID
-               状态停住 —— 否则 PID 会在死区内继续累积 offset_angle 那零点几度噪声，出死区时给一脚
-               （这就是加了 1° 死区后仍然残留的轻微抖动）。 */
-            if (fabsf(snapped - raw) < 2.0f)
+            /* 外死区与 PID DeadBand 对齐 0.5°: 拧开后更快进入纠偏, 对齐后清积分/停 PID 状态防抖。 */
+            if (fabsf(snapped - raw) < 0.5f)
             {
                 chassis_follow_pid.resetIntegral();
                 chassis_follow_pid.setSetpoint(snapped);

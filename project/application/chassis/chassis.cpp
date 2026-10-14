@@ -2,8 +2,11 @@
  * @file    chassis.cpp
  * @brief   底盘应用
  *
- * 控制逻辑(状态机 / 麦轮逆解 / 限幅判断)与旧 C 版 chassis.c 逐行一致; 电流环由电机模块内部承担。
- * PID 数值照抄旧 C, 输出量纲(A vs 电流计数)/积分时间(ms vs s)/限幅的换算统一交给 pid_port.h。
+ * 控制逻辑(状态机 / 限幅)沿旧 C 版; 轮组为 X 型全向轮, 使用标准正/逆运动学。
+ * PID 数值照抄旧 C, 量纲换算见 pid_port.h。
+ *
+ * 说明: 旧固件用麦轮公式在全向轮上也能动, 是因为两者平移项同构、只差 √2 幅值;
+ * 这里按全向几何写正逆解, 旋转臂长用 OMNI_WHEEL_CHASSIC_RADIUS。
  */
 #include "chassis.h"
 #include "robot_def.h"
@@ -17,33 +20,30 @@
 
 /* chassis_cmd_recv 等的 extern 声明在 robot_cmd.h */
 
-/* 与 robot_def.h 中的定义同值 */
 #ifndef DEGREE_2_RAD
-#define DEGREE_2_RAD 0.01745329252f // pi/180
+#define DEGREE_2_RAD 0.01745329252f
 #endif
 
-#define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)   // 半轴距
-#define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #ifndef PERIMETER_WHEEL
-#define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
+#define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI)
 #endif
 
-/* 底盘是单例, 不需要单独的结构体 */
-static float sin_theta, cos_theta; // 底盘速度解算用
+/* X 型全向: 45° 投影系数 √2/2; 旋转臂长 = 轮心到几何中心距离(mm)→指令域 */
+#define OMNI_S           0.70710678118f
+#define OMNI_R_CMD       ((OMNI_WHEEL_CHASSIC_RADIUS) * DEGREE_2_RAD)
 
-static float chassis_rotate_buff;
+static float sin_theta, cos_theta;
 
-static SuperCap cap;                                                 // 超级电容
+static SuperCap cap;
 static uint16_t power_data;
-static DJIMotor motor_lf, motor_rf, motor_lb, motor_rb;              // left right forward back
-/* 用于自旋变速策略的时间变量 */
-static float t;
+static DJIMotor motor_lf, motor_rf, motor_lb, motor_rb;
 
 Chassis_Upload_Data_s chassis_feedback_data;
 
-/* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
-static float chassis_vx, chassis_vy;     // 将云台系的速度投影到底盘
-static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出,待进行限幅
+/* 底盘系目标速度(云台系旋过来后) / 四轮目标速度 / 由轮速正解得到的估计速度 */
+static float chassis_vx, chassis_vy;
+static float vt_lf, vt_rf, vt_lb, vt_rb;
+static float est_vx, est_vy, est_wz;
 
 /* 速度环数值照抄旧 C(一字不改), 量纲/积分单位/输出限幅的换算见 pid_port.h */
 static const PidPort kChassisSpeedPid = {
@@ -107,22 +107,18 @@ void ChassisInit()
     };
     cap.init(capconfig);
 }
-#define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RF_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define LB_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RB_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
 
 static void ChassisStateSet()
 {
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
-    { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
+    {
         motor_lf.setEnable(0);
         motor_rf.setEnable(0);
         motor_lb.setEnable(0);
         motor_rb.setEnable(0);
     }
     else
-    { // 正常工作
+    {
         motor_lf.setEnable(1);
         motor_rf.setEnable(1);
         motor_lb.setEnable(1);
@@ -135,8 +131,49 @@ static void SendPowerData()
     power_data = chassis_cmd_recv.power_limit;
 }
 
-/* 云台系速度按 offset_angle 旋到底盘系, 再分配到四个麦轮 */
-static void MecanumCalculate()
+/**
+ * X 型全向逆解: 底盘系 (vx, vy, wz) → 四轮线速度指令
+ *
+ *   v_lf = S*( vx - vy) - wz*R
+ *   v_rf = S*( vx + vy) + wz*R
+ *   v_lb = S*( vx + vy) - wz*R
+ *   v_rb = S*( vx - vy) + wz*R
+ *
+ * S=√2/2, R=OMNI_WHEEL_CHASSIC_RADIUS(指令域)。左右轮 direction 仍为左反右正。
+ */
+static void OmniInverse(float vx, float vy, float wz,
+                        float *lf, float *rf, float *lb, float *rb)
+{
+    const float wx = OMNI_S * (vx - vy);
+    const float wy = OMNI_S * (vx + vy);
+    const float wr = wz * OMNI_R_CMD;
+    *lf = wx - wr;
+    *rf = wy + wr;
+    *lb = wy - wr;
+    *rb = wx + wr;
+}
+
+/**
+ * X 型全向正解: 四轮速度 → 底盘系 (vx, vy, wz)
+ * 与 OmniInverse 互逆(最小二乘意义下对 4 轮冗余取均值)。
+ */
+static void OmniForward(float lf, float rf, float lb, float rb,
+                        float *vx, float *vy, float *wz)
+{
+    /* vx = (lf+rf+lb+rb)/(2√2),  vy = (-lf+rf+lb-rb)/(2√2)
+       因 1/(2S)=√2,  1/(2√2)=S/2?  由逆解:
+         lf+rb = 2S(vx-vy),  rf+lb = 2S(vx+vy)
+         vx = [(lf+rb)+(rf+lb)]/(4S), vy = [-(lf+rb)+(rf+lb)]/(4S)
+       4S = 2√2,  1/(4S) = 1/(2√2) = √2/4 = 0.35355339 */
+    const float inv_4s = 0.35355339059f;
+    *vx = (lf + rf + lb + rb) * inv_4s;
+    *vy = (-lf + rf + lb - rb) * inv_4s;
+    /* wz: (rb-lf)/(2R) 与 (rf-lb)/(2R) 平均 */
+    *wz = ((rb - lf) + (rf - lb)) * (0.25f / OMNI_R_CMD);
+}
+
+/* 云台系速度旋到底盘系, 再逆解到四轮 */
+static void OmniCalculate()
 {
     cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
     sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
@@ -144,26 +181,26 @@ static void MecanumCalculate()
     chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
-    vt_lf = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
-    vt_lb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vx - chassis_vy + chassis_cmd_recv.wz * RB_CENTER;
-    vt_rf = chassis_vx + chassis_vy + chassis_cmd_recv.wz * RF_CENTER;
+    OmniInverse(chassis_vx, chassis_vy, chassis_cmd_recv.wz,
+                &vt_lf, &vt_rf, &vt_lb, &vt_rb);
 }
 
-/* 用电容电压判定 power_flag, 并把四轮目标速度下发给速度环 */
+/* 用电机反馈速度做正解, 得到当前底盘系估计速度(调试用) */
+static void OmniEstimateFromMotors()
+{
+    OmniForward(motor_lf.velocity_, motor_rf.velocity_,
+                motor_lb.velocity_, motor_rb.velocity_,
+                &est_vx, &est_vy, &est_wz);
+}
+
 static void LimitChassisOutput()
 {
-
     if (cap.cap_msg_.vol < 24 && cap.cap_msg_.vol > 13)
-    {
         chassis_feedback_data.power_flag = 1;
-    }
     else
-    {
         chassis_feedback_data.power_flag = 0;
-    }
 
-    motor_lf.setVelocity(vt_lf); // 单位 deg/s
+    motor_lf.setVelocity(vt_lf);
     motor_rf.setVelocity(vt_rf);
     motor_lb.setVelocity(vt_lb);
     motor_rb.setVelocity(vt_rb);
@@ -172,8 +209,9 @@ static void LimitChassisOutput()
 void ChassisTask()
 {
     ChassisStateSet();
-    MecanumCalculate();
+    OmniCalculate();
     LimitChassisOutput();
+    OmniEstimateFromMotors();
     SendPowerData();
     cap.send((uint8_t *)&power_data, sizeof(power_data));
 }
