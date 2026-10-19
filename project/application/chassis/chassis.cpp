@@ -45,18 +45,18 @@ static float chassis_vx, chassis_vy;
 static float vt_lf, vt_rf, vt_lb, vt_rb;
 static float est_vx, est_vy, est_wz;
 
-/* 速度环数值照抄旧 C(一字不改), 量纲/积分单位/输出限幅的换算见 pid_port.h */
+/* 速度环直出电调(电调自带电流环)。去掉软件内环后前向增益≈×3,
+   Kp 10→3.5 对齐原等效; MaxOut=15000; 浅 Ki。 */
 static const PidPort kChassisSpeedPid = {
-    .Kp = 10,
-    .Ki = 0,
+    .Kp = 3.5f,
+    .Ki = 0.1f,
     .Kd = 0,
     .IntegralLimit = 3000,
-    .MaxOut = 12000,
+    .MaxOut = 15000,
     .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
 };
 
-/* 旧 current_PID（底盘）: Kp=0.5, Ki=0, Kd=0, IntegralLimit=3000, MaxOut=15000(ESC 计数)。
-   内环在安培域跑，故只有 MaxOut 要换算: 15000*PID_SCALE_M3508 = 18.31A。 */
+/* 底盘已关电流环; 配置保留。 */
 static const PidPort kChassisCurrentPid = {
     .Kp = 0.5f,
     .Ki = 0.0f,
@@ -78,10 +78,8 @@ void ChassisInit()
         .reduction_ratio = 1.0f,
         // 3508 速度环由 MOTOR 任务 5 分频以 200Hz(5ms) 调用(与旧固件 motor_task.c 一致), 故 period = 5
         .pid_velocity = pidPort(kChassisSpeedPid, PID_SCALE_M3508, 5),
-        /* 旧底盘 close_loop_type = SPEED_LOOP | CURRENT_LOOP → 后面还串了一级电流内环。
-           内环参考/反馈都在安培域, 故 output_scale = 1.0, period 与速度环相同(5ms)。 */
         .pid_current = pidPort(kChassisCurrentPid, 1.0f, 5),
-        .current_loop_enable = 1,
+        .current_loop_enable = 0,
     };
 
     chassis_motor_config.motor_id = 4;

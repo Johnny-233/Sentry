@@ -112,6 +112,7 @@ static void Referee_ParseFrame(uint8_t *buf, uint16_t len)
                 break;
             case ID_robot_hurt:
                 memcpy(&referee_info.robot_hurt, data, sizeof(robot_hurt_t));
+                referee_info.robot_hurt_seq++; /* 事件边沿: 供 ArmorHitUpdate 去重/消费 */
                 break;
             case ID_shoot_data:
                 memcpy(&referee_info.shoot_data, data, sizeof(shoot_data_t));

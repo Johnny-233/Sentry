@@ -253,9 +253,11 @@ void DJIMotor::init(const Config& config)
     if (config.motor_id > 8 || config.motor_id == 0)
         return;  // 能进这里家里得请高人了
 
+    /* 必须挂 htim5：MOTOR 任务合成的 1ms tick 只派发给 htim_==&htim5 的 Daemon。
+     * 原先 htim=nullptr → 失联回调永不触发 → motor_valid_ 粘在 1（裁判断电机总线也检不到）。 */
     Daemon::Config daemon_config = {
-        .tim_config = { .htim = nullptr },  // 原 C 未设 tim_config，htim 为 NULL
-        .cycle = 100,                        // 守护进程 ms
+        .tim_config = { .htim = &htim5 },
+        .cycle = 100,
         .daemon_callback = loseCallback,
         .device = this,
     };

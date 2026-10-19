@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 #include "bsp_can.h"
+#include "daemon.h"
 #include "pid.h" /* CalMiMotorTorque 的三环级联用对方 PID 类（原 PIDInstance） */
 
 #define MI_MOTOR_CNT 12 // 最多注册的 MI 电机实例数（原 mi_motor_instance[] 的长度）
@@ -219,7 +220,7 @@ public:
     float torque_ = 0.0f;      // 力矩 [N*m]（原 motor->measure.torque）
     float temperature_ = 0.0f; // 温度 [℃]（原 motor->measure.temperature）
     uint8_t motor_id_ = 0;     // 电机 ID（原 motor->motor_id）
-    uint8_t valid_ = 0;        // 收到过反馈帧（原实现无此标志，移植时新增，供上层判通信）
+    uint8_t valid_ = 0;        // 1=近期有反馈；失联守护超时清 0（供云台判掉电重回零）
 
     MI_Motor_Measure_s measure_ = {};                  // 原 motor->measure（与上面 4 个公开字段同源）
     motor_state_e motor_state_ = OK;                   // 原 motor->motor_state
@@ -229,12 +230,14 @@ public:
 
 private:
     static void decodeCallback(void* device);                                    // 原 DecodeMiMotor（通信类型 2 反馈解包）
+    static void loseCallback(void* device);                                      // 失联守护：清 valid_
     static uint32_t packExtId(uint8_t mode, uint16_t data, uint8_t motor_field); // 原 EXT_ID_t 位域打包
     void clearTxBuff();                                                          // 原 for(i<8) tx_buff[i]=0
     void stageFrame(uint8_t mode, uint16_t data, uint8_t motor_field = MI_EXT_ID_MOTOR_FIELD); // 原"填进共享发送实例"→本实例待发帧
     void sendFrameNow(uint8_t mode, uint16_t data, uint8_t motor_field, float timeout);        // 一次性帧：立即发送（不进周期重发）
 
     CAN can_;                // 原 motor_can_instace（收）+ mi_sender_assignment[0]（发）
+    Daemon daemon_lose_;     // 反馈超时看门狗（挂 htim5，与 MOTOR 任务合成的 1ms tick）
     uint8_t tx_pending_ = 0; // 原 sender_enable_flag：防止发送空帧
 
     // —— 类级注册表（替代原文件级 static mi_motor_instance[]/idx）——

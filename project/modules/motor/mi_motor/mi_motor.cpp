@@ -78,10 +78,17 @@ void MIMotor::decodeCallback(void* device)
     motor->torque_ = measure->torque;
     motor->temperature_ = measure->temperature;
 
-    motor->valid_ = 1; // 收到反馈帧，标记通信有效（原实现无此标志, 移植时新增）
+    motor->valid_ = 1;
+    motor->daemon_lose_.reset(); /* 喂狗：裁判断电机总线后超时会 loseCallback 清 valid_ */
 
     /* 原 DecodeMiMotor 只解 4 个浮点; 反馈帧里的故障位/模式位在扩展 ID 上, 对方 bsp_can 的
      * fifoCallback 只把 8 字节数据传给回调, 因此 motor_state_/motor_mode_state_ 与原实现一致地保持初值 */
+}
+
+void MIMotor::loseCallback(void* device)
+{
+    MIMotor* motor = static_cast<MIMotor*>(device);
+    motor->valid_ = 0;
 }
 
 /**
@@ -418,6 +425,17 @@ void MIMotor::init(const Config& config)
         can_.tx_conf_.RTR = CAN_RTR_DATA;
         can_.tx_conf_.DLC = 0x08;
     }
+
+    /* 失联守护挂 htim5(MOTOR 任务 1kHz 合成 tick)。原 valid_ 只置 1 从不超时清零 →
+     * 裁判重启断电机总线后云台仍以为 pitch 在线、跳过回零 → 软限位坐标系错乱。 */
+    Daemon::Config daemon_config = {
+        .tim_config = { .htim = &htim5 },
+        .cycle = 150, /* 150ms：略宽于 MI 100Hz 反馈，短于裁判典型断电时长 */
+        .daemon_callback = loseCallback,
+        .device = this,
+    };
+    daemon_lose_.init(daemon_config);
+    valid_ = 0;
 
     /* 原: mi_motor_instance[idx++] = motor;（MiMotorControl() 遍历它做周期重发） */
     for (uint8_t i = 0; i < idx_; i++)

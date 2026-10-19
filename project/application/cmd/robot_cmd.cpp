@@ -123,17 +123,16 @@ static PID chassis_follow_pid; // 底盘跟随模式PID
 static cal_round_patrol_t round_patrol;
 static cal_mid_round_patrol_t mid_round_patrol;
 
-/* 底盘跟随云台: 输出 wz(与轮速同域)。pid_port 换算周期 = ROBOT 200Hz = 5ms。
- * 实车: 一推杆底盘相对云台拧开、停杆回正 → 瞬态跟随偏慢(非稳态残余)。
- * 相对旧参加大 Kp/Kd、收死区, 提高推杆瞬间纠偏; 若静止抖动再把 Kp 降回 50~60。 */
+/* 底盘跟随云台: 输出 wz。初值只作 init; 实际 Kp/Kd 在 ChassisRotateSet 按 |误差| 分段改写。
+ * DeadBand=0: 死区改由外层统一处理, 避免与分段增益叠两层。 */
 static const PidPort kChassisFollowPid = {
-    .Kp = 110.0f,
+    .Kp = 70.0f,
     .Ki = 0.0f,
-    .Kd = 5.0f,
+    .Kd = 3.5f,
     .IntegralLimit = 0.0f,
-    .MaxOut = 5000.0f,
+    .MaxOut = 5500.0f,
     .Improve = PID_Derivative_On_Measurement,
-    .DeadBand = 0.5f,
+    .DeadBand = 0.0f,
     .FF_Gain = 0.0f,
 };
 
@@ -323,35 +322,52 @@ void FoundEnermy()
     }
     /* |误差| ≤ 0.3°: 死区锁死 */
 
-    /* pitch: 自适应滤波增量式 — 对视觉误差做滤波,保持在编码器坐标系 */
+    /* pitch: 增量式 + 按 |误差| 分段(大误差快追, 近零低增益/强滤波)。
+     * 历史: 全局提高 alpha+gain(→0.0012) 会震荡; 已先把 MI kd 提到 1.8, 这里只加速大误差区。
+     * Cal_FollowControl_Set_Pitch 仍未接入(绝对角滤波), 自瞄 pitch 走编码器增量坐标系。 */
     {
-        static float err_filtered = 0;
-        static float err_last = 0;
-        float raw_err = minipc_recv_data->Vision.pitch;
+        static float err_filtered = 0.0f;
+        static float err_last = 0.0f;
+        const float raw_err = minipc_recv_data->Vision.pitch;
+        const float abs_e = fabsf(raw_err);
 
-        if (fabsf(raw_err) > 0.3f)
+        if (abs_e > 0.3f)
         {
-            float err_delta = raw_err - err_last;
+            const float err_delta = raw_err - err_last;
             float alpha;
+            float gain;
 
-            // 误差估计的滤波强度(τ = 5ms/alpha)。注意: 加大增益+加快滤波会在实车上引起 pitch 震荡
-            // (相位裕度不足), 已回退原值; 要提高跟踪速度必须同时加大 MI 电机 kd, 见 CODE_REVIEW.md。
-            if (fabsf(err_delta) > 0.5f)
-                alpha = 0.3f;    // 大跳变: 快速跟上
-            else if (fabsf(err_delta) > 0.05f)
-                alpha = 0.2f;    // 跟踪中: 中等响应
+            if (abs_e > 5.0f || fabsf(err_delta) > 0.8f)
+            {
+                alpha = 0.45f;   /* 大偏差/跳变: 快跟上 */
+                gain = 0.00085f;
+            }
+            else if (abs_e > 1.5f)
+            {
+                alpha = 0.30f;
+                gain = 0.00070f;
+            }
             else
-                alpha = 0.1f;    // 微调: 强滤波抑制噪声
+            {
+                alpha = 0.15f;   /* 近零: 保守, 防相位不足震荡 */
+                gain = 0.00055f;
+            }
 
             err_filtered = alpha * raw_err + (1.0f - alpha) * err_filtered;
             err_last = raw_err;
 
-            // 增量式控制, 增益可安全设高
-            gimbal_cmd_recv.pitch += 0.0005f * err_filtered;
+            float step = gain * err_filtered;
+            const float step_max = 0.004f; /* 单拍限幅 @200Hz ≈ 0.8 rad/s */
+            if (step > step_max)
+                step = step_max;
+            else if (step < -step_max)
+                step = -step_max;
+            gimbal_cmd_recv.pitch += step;
         }
         else
         {
-            err_last = 0;
+            err_last = 0.0f;
+            err_filtered *= 0.5f; /* 死区衰减, 避免再入环时旧误差顶一脚 */
         }
     }
 }
@@ -360,32 +376,82 @@ static void ChassisRotateSet()
 {
     switch (chassis_cmd_recv.chassis_mode)
     {
-        //底盘跟随模式,将offset_angle量化到最近的90°作为目标(4个正方向)
+        /* 底盘跟随: 分段增益(远快近软) + 死区滞回(消边界微抖) + wz 斜率限幅 */
         case CHASSIS_FOLLOW_GIMBAL_YAW:
         {
-            /* offset 低通: α 过小会拖慢“一推就拧”的纠偏。α=0.35 @200Hz ≈ 12ms。 */
             static float offset_filt = 0.0f;
-            offset_filt += 0.35f * (chassis_cmd_recv.offset_angle - offset_filt);
-            float raw = offset_filt;
+            static float wz_out = 0.0f;
+            static uint8_t in_dead = 1;
+            offset_filt += 0.26f * (chassis_cmd_recv.offset_angle - offset_filt);
+            const float raw = offset_filt;
             float snapped;
             if (raw >= 0.0f)
                 snapped = (float)((int)(raw / 90.0f + 0.5f)) * 90.0f;
             else
                 snapped = (float)((int)(raw / 90.0f - 0.5f)) * 90.0f;
-            chassis_follow_pid.setSetpoint(snapped);
-            /* 外死区与 PID DeadBand 对齐 0.5°: 拧开后更快进入纠偏, 对齐后清积分/停 PID 状态防抖。 */
-            if (fabsf(snapped - raw) < 0.5f)
+
+            const float err = snapped - raw;
+            const float abs_err = fabsf(err);
+            /* 滞回: 进死区要更小、出死区要更大 → 误差在阈值附近来回时不会反复启停抖 */
+            const float DEAD_IN = 0.85f;
+            const float DEAD_OUT = 1.40f;
+            if (in_dead)
+            {
+                if (abs_err > DEAD_OUT)
+                    in_dead = 0;
+            }
+            else if (abs_err < DEAD_IN)
+            {
+                in_dead = 1;
+            }
+
+            /* setParameters 的 kd 与 pidPort 一致: 旧 Kd(配秒) → 内部 kd' = Kd*1000(配 ms) */
+            if (in_dead)
             {
                 chassis_follow_pid.resetIntegral();
+                chassis_follow_pid.setParameters(40.0f, 0.0f, 2.5f * 1000.0f);
                 chassis_follow_pid.setSetpoint(snapped);
-                chassis_follow_pid.update(snapped); /* 测量=设定 → 误差 0, 状态不再发散 */
+                chassis_follow_pid.update(snapped);
+                wz_out = 0.0f;
                 chassis_cmd_recv.wz = 0.0f;
             }
             else
             {
+                float kp, kd_old;
+                float step_max; /* 每拍 wz 最大变化 @200Hz */
+                if (abs_err > 5.0f)
+                {
+                    kp = 145.0f; /* 大拧开: 比上版更快 */
+                    kd_old = 4.5f;
+                    step_max = 320.0f;
+                }
+                else if (abs_err > 2.0f)
+                {
+                    kp = 115.0f;
+                    kd_old = 4.0f;
+                    step_max = 220.0f;
+                }
+                else
+                {
+                    kp = 38.0f; /* 刚出死区: 尽量软, 靠滞回消抖 */
+                    kd_old = 2.5f;
+                    step_max = 35.0f;
+                }
+
+                chassis_follow_pid.setParameters(kp, 0.0f, kd_old * 1000.0f);
                 chassis_follow_pid.setSetpoint(snapped);
                 chassis_follow_pid.update(raw);
-                chassis_cmd_recv.wz = chassis_follow_pid.output_;
+                float wz_target = chassis_follow_pid.output_;
+                if (abs_err < 2.0f)
+                    wz_target *= 0.50f;
+
+                float dz = wz_target - wz_out;
+                if (dz > step_max)
+                    dz = step_max;
+                else if (dz < -step_max)
+                    dz = -step_max;
+                wz_out += dz;
+                chassis_cmd_recv.wz = wz_out;
             }
         }
         break;

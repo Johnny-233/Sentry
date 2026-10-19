@@ -67,9 +67,10 @@ static const PidPort kYawSpeedPid = {
     .FF_Gain = 0.0f,  // 陀螺噪声会被微分放大, 保持 0(旧 500 从未生效)
 };
 
-/* pitch 位置环的 kp/kd：旧版取自 pitch_motor->motor_controller.angle_PID, 值不变(Kp=15, Kd=1.0) */
+/* pitch 位置环 kp/kd(经 locationControl 下发给 MI 内置环)。
+ * kd 1.0→1.8: 先加阻尼再提自瞄增益, 避免上次「滤波+增益一起加快」导致的 pitch 震荡。 */
 static const float PITCH_ANGLE_KP = 15.0f;
-static const float PITCH_ANGLE_KD = 1.0f;
+static const float PITCH_ANGLE_KD = 1.8f;
 
 /* MI 电机 CAN ID：旧 C 版所有 MI 报文的 ExtId.motor_id 域都写死 127（CyberGear 出厂默认 CAN ID，
  * 新模块 mi_motor.h 的 MI_EXT_ID_MOTOR_FIELD 也是 127），而 MIMotor::init() 把 Config::motor_id
@@ -148,11 +149,12 @@ void GimbalInit()
 static uint8_t pitch_homed = 0;    /* 1 = 本次使能期间已完成回零 */
 
 /* 请求重新回零：MI 电机掉线/重新使能后，setMechPositionToZero() 建立的零位会失效，
-   继续在旧坐标系里发指令它就会顶到限位（现象："pitch 控不了"）。 */
+   继续在旧坐标系里发指令就会顶到限位（裁判重启断电机、主控不断电时必现）。 */
 static uint8_t homing_reset_req = 0;
 static void PitchHomingRequest(void)
 {
     homing_reset_req = 1;
+    pitch_homed = 0; /* 立刻作废软限位坐标系，不必等 PitchHomingTask 跑到 */
 }
 
 /* 返回 1 表示已完成回零(调用方可以正常控制 pitch), 0 表示仍在回零/回零失败 */
@@ -296,17 +298,16 @@ static void YawControlUpdate(void)
 }
 
 /* 电机掉电/失联恢复 + 裁判断电复活后的重新对齐：
- *  - yaw(GM6020)：软件累加角度基点会错位 → resetAngle() 重新对齐（控制环用 IMU，不受影响）
- *  - pitch(MI)：内部绝对基准重置、机械零位失效 → motor_init=0 并重做回零
- *  - Death_reInit：裁判 HP==0 断电，复活(1→0 沿)时走同一套恢复流程 */
+ *  - yaw(GM6020)：恢复时只重设设定值，不 resetAngle（上电误清零会搞乱跟随）
+ *  - pitch(MI)：掉电后绝对基准/机械零位失效 → 必须重做回零
+ *  - Death_reInit：裁判 HP==0 断电，复活沿走同一套
+ *
+ * 注意：旧代码里 pitch valid_ 只置 1 从不超时清零，裁判重启断电机后检测不到失联，
+ *       pitch_homed 仍为 1 → C→N 跳过回零 → 软限位坐标系错乱。MI 已加 150ms 失联守护。 */
 static void GimbalRecoverCheck()
 {
-    static uint8_t yaw_lost = 0, pitch_lost = 0, death = 0, yaw_seen = 0;
+    static uint8_t yaw_lost = 0, pitch_lost = 0, death = 0, yaw_seen = 0, pitch_seen = 0;
 
-    /* ⚠不能在这里 resetAngle() 清零 yaw 累加角度：上电头几拍 motor_valid_ 还是 0（反馈帧没到），
-       会被误判成"掉线→恢复"，一上电就把角度清零 → offset_angle/底盘偏角整体错位，
-       现象就是"重新上电后四个就近跟随方向错、摇杆移动方向与实际不符"。
-       所以：(a) 只有"曾经有效过"才允许判掉线；(b) 恢复时只重设设定值，不重建角度基准。 */
     if (!yaw_motor.motor_valid_)
     {
         if (yaw_seen)
@@ -318,17 +319,26 @@ static void GimbalRecoverCheck()
         if (yaw_lost)
         {
             yaw_lost = 0;
-            motor_init = 0; /* 让 motor_init==0 分支用当前 IMU 角度重设设定值, 避免阶跃 */
+            motor_init = 0;
         }
     }
 
+    /* 只有曾经在线过才记 lost，避免上电头几拍 valid_=0 误触发"恢复回零" */
     if (!pitch_motor.valid_)
-        pitch_lost = 1;
-    else if (pitch_lost)
     {
-        pitch_lost = 0;
-        motor_init = 0;
-        PitchHomingRequest();
+        if (pitch_seen)
+            pitch_lost = 1;
+    }
+    else
+    {
+        pitch_seen = 1;
+        if (pitch_lost)
+        {
+            pitch_lost = 0;
+            motor_init = 0;
+            PitchHomingRequest();
+            LOG_INFO(LOG_MOD_GIMB, "homing", "pitch re-online after loss -> re-homing");
+        }
     }
 
     if (gimbal_cmd_recv.Death_reInit)
@@ -338,6 +348,7 @@ static void GimbalRecoverCheck()
         death = 0;
         motor_init = 0;
         PitchHomingRequest();
+        LOG_INFO(LOG_MOD_GIMB, "homing", "Death_reInit clear -> pitch re-homing");
     }
 }
 

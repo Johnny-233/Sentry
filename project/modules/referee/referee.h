@@ -42,6 +42,8 @@ typedef struct {
     // 状态标志
     uint8_t init_flag;
     uint8_t online;
+    /* 每收到一帧 0x0206 自增; armor_hit 用边沿消费, 避免轮询残留字段误触发 */
+    uint16_t robot_hurt_seq;
 } referee_info_t;
 
 #pragma pack()
